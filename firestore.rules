@@ -1,0 +1,131 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        (request.auth.token.email != null && (
+          request.auth.token.email.lower() == 'kuzehentai@gmail.com' ||
+          request.auth.token.email.lower() == 'kuzeofc@gmail.com' ||
+          request.auth.token.email.lower() == 'metzelderkz@gmail.com'
+        )) ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // --- CATÁLOGO DE LA APLICACIÓN ---
+    // Cualquier visitante puede LEER en tiempo real; solo los administradores pueden ESCRIBIR.
+    match /animes/{animeId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /studios/{studioId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /genres/{genreId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /config/{configId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /trash/{trashId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /admins/{adminId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // --- ANUNCIOS Y SOPORTE ---
+    match /announcements/{postId} {
+      allow read: if true;
+      allow create, delete: if isAdmin();
+      allow update: if isSignedIn();
+    }
+
+    match /announcements_media/{mediaId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /support_reports/{reportId} {
+      allow read: if isAdmin();
+      allow create: if true;
+      allow update, delete: if isAdmin();
+    }
+
+    match /support_config/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // --- INTERACCIONES DE USUARIO ---
+    match /comentariosGlobales/{commentId} {
+      allow read: if true;
+      allow create: if isSignedIn();
+      allow update, delete: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    match /userLists/{userId}/{document=**} {
+      allow read, write: if (isSignedIn() && request.auth.uid == userId) || isAdmin();
+    }
+
+    match /userWatched/{userId}/{document=**} {
+      allow read, write: if (isSignedIn() && request.auth.uid == userId) || isAdmin();
+    }
+
+    match /user_lists/{docId} {
+      allow read, write: if isSignedIn() || isAdmin();
+    }
+
+    match /anime_mylist_saves/{saveId} {
+      allow read: if true;
+      allow write: if isSignedIn() || isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read: if true;
+      allow write: if (isSignedIn() && request.auth.uid == userId) || isAdmin();
+    }
+
+    match /usernames/{username} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    match /ratings/{ratingId} {
+      allow read, write: if true;
+    }
+
+    match /anime_ratings/{ratingId} {
+      allow read, write: if true;
+    }
+
+    match /user_anime_votes/{voteId} {
+      allow read, write: if true;
+    }
+
+    match /votes/{voteId} {
+      allow read, write: if true;
+    }
+
+    match /app_metrics/{metricId} {
+      allow read, write: if true;
+    }
+
+    match /test/{testId} {
+      allow read, write: if true;
+    }
+  }
+}
