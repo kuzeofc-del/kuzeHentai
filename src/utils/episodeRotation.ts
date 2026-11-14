@@ -5,6 +5,7 @@
 
 import { db, doc, setDoc } from '../lib/firebase';
 import { Anime, Episode } from '../types';
+import { getEpisodeUrl } from './episodeUtils';
 
 export interface RotationResult {
   evictedCount: number;
@@ -14,16 +15,18 @@ export interface RotationResult {
 }
 
 /**
- * Removes any `undefined` properties from an Episode object so Firebase Firestore
- * never rejects the document payload.
+ * Removes any `undefined` properties and legacy duplicate URL fields from an Episode object
+ * so Firebase Firestore stores solely `mp4Url` and never rejects the payload.
  */
 export function sanitizeEpisodeForFirestore(ep: Episode): Episode {
+  const LEGACY_URL_KEYS = new Set(['telegramUrl', 'url', 'videoUrl', 'link', 'embedUrl', 'streamUrl']);
   const clean: Record<string, any> = {};
   Object.entries(ep).forEach(([key, val]) => {
-    if (val !== undefined) {
+    if (val !== undefined && !LEGACY_URL_KEYS.has(key)) {
       clean[key] = val;
     }
   });
+  clean.mp4Url = getEpisodeUrl(ep);
   return clean as Episode;
 }
 

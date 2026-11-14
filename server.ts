@@ -21,7 +21,8 @@ import {
   deleteDoc,
   writeBatch,
   addDoc,
-  serverTimestamp
+  serverTimestamp,
+  deleteField
 } from 'firebase/firestore';
 export interface Studio {
   id: string;
@@ -44,10 +45,6 @@ export interface Genre {
 export interface Episode {
   number: number;
   mp4Url: string;
-  telegramUrl?: string;
-  url?: string;
-  videoUrl?: string;
-  link?: string;
   title?: string;
   name?: string;
   isNew?: boolean;
@@ -529,6 +526,14 @@ async function optimizeEpisodeCoverIfNeeded(coverStr: string): Promise<string> {
   }
 }
 
+function getEpisodeUrl(ep: any): string {
+  if (!ep) return '';
+  if (typeof ep === 'string') return ep.trim();
+  return String(
+    ep.mp4Url || ep.telegramUrl || ep.url || ep.videoUrl || ep.link || ep.embedUrl || ep.streamUrl || ''
+  ).trim();
+}
+
 // --- Episode Normalization & Safe Merge Helpers ---
 function normalizeEpisodesList(eps: any): Episode[] {
   if (!eps) return [];
@@ -543,69 +548,61 @@ function normalizeEpisodesList(eps: any): Episode[] {
           result.push({
             number: idx + 1,
             mp4Url: link,
-            telegramUrl: link,
-            url: link,
-            videoUrl: link,
-            link: link
           });
         }
       } else if (typeof ep === 'object') {
         const number = Number(ep.number || ep.epNumber || ep.episode || ep.cap || (idx + 1)) || (idx + 1);
-        const link = String(
-          ep.mp4Url || ep.telegramUrl || ep.url || ep.videoUrl || ep.link || ep.embedUrl || ep.streamUrl || ''
-        ).trim();
+        const link = getEpisodeUrl(ep);
         result.push({
           number,
           mp4Url: link,
-          telegramUrl: link,
-          url: link,
-          videoUrl: link,
-          link: link,
           isNew: Boolean(ep.isNew),
           ...(ep.title ? { title: String(ep.title) } : {}),
           ...(ep.name ? { name: String(ep.name) } : {}),
           ...(ep.coverImage ? { coverImage: String(ep.coverImage) } : {}),
           ...(ep.thumbnail ? { thumbnail: String(ep.thumbnail) } : {}),
-          ...(ep.addedToRecentAt ? { addedToRecentAt: String(ep.addedToRecentAt) } : {})
+          ...(ep.addedToRecentAt ? { addedToRecentAt: String(ep.addedToRecentAt) } : {}),
+          ...(typeof ep.orderIndex === 'number' ? { orderIndex: ep.orderIndex } : {}),
         });
       }
     });
   } else if (typeof eps === 'object') {
-    Object.keys(eps).forEach(key => {
+    Object.keys(eps).forEach((key, idx) => {
       const val = eps[key];
       if (!val) return;
-      const number = Number(key) || 1;
+      const number = (typeof val === 'object' && val && (Number(val.number) || Number(val.epNumber)))
+        ? (Number(val.number) || Number(val.epNumber))
+        : (Number(key) || idx + 1);
       let link = '';
       let title = '';
       let isNew = false;
       let coverImage: string | undefined = undefined;
       let thumbnail: string | undefined = undefined;
       let addedToRecentAt: string | undefined = undefined;
+      let orderIndex: number | undefined = undefined;
 
       if (typeof val === 'string') {
         link = val.trim();
       } else if (typeof val === 'object') {
-        link = String(val.mp4Url || val.telegramUrl || val.url || val.videoUrl || val.link || '').trim();
+        link = getEpisodeUrl(val);
         if (val.title) title = String(val.title);
         if (val.name) title = String(val.name);
         if (val.isNew) isNew = true;
         if (val.coverImage) coverImage = String(val.coverImage);
         if (val.thumbnail) thumbnail = String(val.thumbnail);
         if (val.addedToRecentAt) addedToRecentAt = String(val.addedToRecentAt);
+        if (typeof val.orderIndex === 'number') orderIndex = val.orderIndex;
       }
 
       result.push({
         number,
         mp4Url: link,
-        telegramUrl: link,
-        url: link,
-        videoUrl: link,
-        link: link,
         isNew: Boolean(isNew),
         ...(title ? { title } : {}),
         ...(coverImage ? { coverImage } : {}),
         ...(thumbnail ? { thumbnail } : {}),
-        ...(addedToRecentAt ? { addedToRecentAt: String(addedToRecentAt) } : {})
+        ...(addedToRecentAt ? { addedToRecentAt: String(addedToRecentAt) } : {}),
+        ...(typeof orderIndex === 'number' ? { orderIndex } : {}),
       });
     });
   }
@@ -618,14 +615,15 @@ function serializeEpisodesForStorage(eps: any): Record<string, any> {
   const norm = normalizeEpisodesList(eps);
   const map: Record<string, any> = {};
   norm.forEach(ep => {
-    const link = ep.mp4Url || ep.telegramUrl || ep.url || ep.videoUrl || '';
+    const link = getEpisodeUrl(ep);
     map[String(ep.number)] = { 
       mp4Url: link, 
       isNew: Boolean(ep.isNew),
       ...(ep.title ? { title: ep.title } : {}),
       ...(ep.coverImage ? { coverImage: ep.coverImage } : {}),
       ...(ep.thumbnail ? { thumbnail: ep.thumbnail } : {}),
-      ...(ep.addedToRecentAt ? { addedToRecentAt: ep.addedToRecentAt } : {})
+      ...(ep.addedToRecentAt ? { addedToRecentAt: ep.addedToRecentAt } : {}),
+      ...(typeof ep.orderIndex === 'number' ? { orderIndex: ep.orderIndex } : {}),
     };
   });
   return map;
@@ -646,8 +644,8 @@ function mergeAnimeEpisodes(epsA: any[], epsB: any[]): Episode[] {
     if (!existing) {
       epMap.set(ep.number, ep);
     } else {
-      const linkB = ep.mp4Url || ep.telegramUrl || ep.url || ep.videoUrl || '';
-      const linkA = existing.mp4Url || existing.telegramUrl || existing.url || existing.videoUrl || '';
+      const linkB = getEpisodeUrl(ep);
+      const linkA = getEpisodeUrl(existing);
       if (!linkA && linkB) {
         epMap.set(ep.number, ep);
       } else if (linkB.includes('.mp4') && !linkA.includes('.mp4')) {
@@ -727,32 +725,43 @@ class DBService {
 
   private async saveAnimeToFirestoreBg(anime: Anime) {
     try {
-      const firestoreCoverData = (anime.coverData && anime.coverData.length < 100000) ? anime.coverData : null;
+      const resolvedImage = String(anime.image || anime.coverUrl || '').trim();
+      const hasExternalUrl = /^https?:\/\//i.test(resolvedImage);
+      const firestoreCoverData = (!hasExternalUrl && anime.coverData && anime.coverData.startsWith('data:image/') && anime.coverData.length < 700000)
+        ? anime.coverData
+        : null;
       const storageEpisodes = serializeEpisodesForStorage(anime.episodes || []);
       const sIds = (anime.studioIds && anime.studioIds.length > 0)
         ? anime.studioIds
         : (anime.studioId ? [anime.studioId] : []);
+      const cleanContIds = Array.isArray(anime.continuationAnimeIds)
+        ? anime.continuationAnimeIds.map(String).filter(Boolean)
+        : [];
+      const cleanRelMonth = anime.releaseMonth ? String(anime.releaseMonth).trim() : '';
 
-      const payload = {
+      const payload: Record<string, any> = {
         id: String(anime.id),
         name: String(anime.name || ''),
-        image: String(anime.image || ''),
-        coverData: firestoreCoverData,
+        image: resolvedImage,
+        coverUrl: deleteField(),
+        coverData: firestoreCoverData ? firestoreCoverData : deleteField(),
         year: String(anime.year || ''),
-        releaseMonth: String(anime.releaseMonth || ''),
+        releaseMonth: cleanRelMonth ? cleanRelMonth : deleteField(),
         telegramUrl: String(anime.telegramUrl || ''),
         episodes: storageEpisodes,
-        studioId: (anime.studioId || sIds[0]) ? String(anime.studioId || sIds[0]) : '',
+        studioId: deleteField(),
         studioIds: sIds.map(String),
         genreIds: Array.isArray(anime.genreIds) ? anime.genreIds.map(String) : [],
         status: String(anime.status || 'Finalizado'),
         description: String(anime.description || ''),
-        continuationType: anime.continuationType ? String(anime.continuationType) : '',
-        continuationAnimeIds: Array.isArray(anime.continuationAnimeIds) ? anime.continuationAnimeIds.map(String) : [],
+        continuationType: (cleanContIds.length > 0 && anime.continuationType) ? String(anime.continuationType) : deleteField(),
+        continuationAnimeIds: cleanContIds.length > 0 ? cleanContIds : deleteField(),
         hidden: Boolean(anime.hidden),
         downloads: Number(anime.downloads) || 0,
         createdAt: anime.createdAt || new Date().toISOString(),
-        updatedAt: anime.updatedAt || new Date().toISOString()
+        updatedAt: anime.updatedAt || new Date().toISOString(),
+        savedInFirestore: deleteField(),
+        storageLocation: deleteField()
       };
 
       const startBg = Date.now();
@@ -1574,12 +1583,16 @@ class DBService {
     anime.episodes = sanitizedEpisodes;
     anime.year = normalizeAnimeYear(anime.year);
 
-    // Process & store cover image permanently
-    const rawUrl = (anime.coverUrl && anime.coverUrl.trim()) || (anime.image && (anime.image.startsWith('http://') || anime.image.startsWith('https://')) ? anime.image.trim() : '');
+    // Process & store cover image permanently (store external URL strictly once in `image` and delete `coverData`)
+    const rawUrl = (anime.coverUrl && /^https?:\/\//i.test(anime.coverUrl.trim()) ? anime.coverUrl.trim() : '')
+      || (anime.image && /^https?:\/\//i.test(anime.image.trim()) ? anime.image.trim() : '');
+    delete anime.coverUrl;
     if (rawUrl) {
-      anime.coverUrl = rawUrl;
       anime.image = rawUrl;
-      anime.coverData = undefined;
+      delete anime.coverData;
+    } else if (!anime.image && !anime.coverData) {
+      anime.image = '';
+      delete anime.coverData;
     } else {
       const inputImg = anime.image || (existing ? existing.image : '');
       const existingCover = anime.coverData || (existing ? existing.coverData : '');
@@ -1603,33 +1616,42 @@ class DBService {
     }
     this.saveLocal();
 
-    // Sanitize coverData for Firestore payload: purge coverData when URL exists
+    // Sanitize coverData & optional fields for clean Firestore document (omit null/empty/redundant keys)
     const firestoreCoverData = rawUrl
       ? null
-      : ((anime.coverData && anime.coverData.length < 700000) ? anime.coverData : null);
+      : ((anime.coverData && anime.coverData.startsWith('data:image/') && anime.coverData.length < 700000) ? anime.coverData : null);
+    const cleanContIds = Array.isArray(anime.continuationAnimeIds) ? anime.continuationAnimeIds.map(String).filter(Boolean) : [];
+    const cleanRelMonth = anime.releaseMonth ? String(anime.releaseMonth).trim() : '';
 
-    const payload = {
+    const payload: Record<string, any> = {
       id: String(anime.id),
       name: String(anime.name || ''),
       image: String(anime.image || ''),
-      coverUrl: rawUrl || null,
-      coverData: firestoreCoverData,
       year: String(anime.year || ''),
-      releaseMonth: String(anime.releaseMonth || ''),
       telegramUrl: String(anime.telegramUrl || ''),
       episodes: storageEpisodes,
-      studioId: primaryStudioId ? String(primaryStudioId) : '',
       studioIds: sIds.map(String),
       genreIds: Array.isArray(anime.genreIds) ? anime.genreIds.map(String) : [],
       status: String(anime.status || 'Finalizado'),
       description: String(anime.description || ''),
-      continuationType: anime.continuationType ? String(anime.continuationType) : '',
-      continuationAnimeIds: Array.isArray(anime.continuationAnimeIds) ? anime.continuationAnimeIds.map(String) : [],
       hidden: Boolean(anime.hidden),
       downloads: Number(anime.downloads) || 0,
       createdAt: anime.createdAt,
       updatedAt: anime.updatedAt
     };
+
+    if (firestoreCoverData) {
+      payload.coverData = firestoreCoverData;
+    }
+    if (cleanRelMonth) {
+      payload.releaseMonth = cleanRelMonth;
+    }
+    if (cleanContIds.length > 0) {
+      payload.continuationAnimeIds = cleanContIds;
+      if (anime.continuationType) {
+        payload.continuationType = String(anime.continuationType);
+      }
+    }
 
     const docRef = doc(firestoreDb, 'animes', anime.id);
     const startMs = Date.now();
@@ -2026,7 +2048,7 @@ class DBService {
       if (removedIds.has(a.id)) continue;
       if (a.episodes && Array.isArray(a.episodes)) {
         for (const ep of a.episodes) {
-          const key = (ep.telegramUrl || '').trim().toLowerCase();
+          const key = getEpisodeUrl(ep).toLowerCase();
           if (key && key.length > 5) {
             if (!episodeLinkMap.has(key)) episodeLinkMap.set(key, []);
             const list = episodeLinkMap.get(key)!;
@@ -2064,7 +2086,7 @@ class DBService {
         const seenUrl = new Set<string>();
         const cleanEps = [];
         for (const ep of anime.episodes) {
-          const epUrlNorm = (ep.telegramUrl || '').trim().toLowerCase();
+          const epUrlNorm = getEpisodeUrl(ep).toLowerCase();
           if (!seenNum.has(ep.number) && (!epUrlNorm || !seenUrl.has(epUrlNorm))) {
             cleanEps.push(ep);
             seenNum.add(ep.number);
@@ -2112,16 +2134,20 @@ class DBService {
     let totalEpisodes = 0;
 
     for (const anime of this.localDb.animes) {
+      if (anime.image && /^https?:\/\//i.test(anime.image.trim())) {
+        anime.coverData = undefined;
+      }
+      anime.coverUrl = undefined;
+      if ((!anime.studioIds || anime.studioIds.length === 0) && anime.studioId) {
+        anime.studioIds = [anime.studioId];
+      }
       if (anime.episodes) {
         const norm = normalizeEpisodesList(anime.episodes);
-        if (norm.length > 0) {
-          const cleanStorageEps = serializeEpisodesForStorage(norm);
-          anime.episodes = norm;
-          migratedAnimes++;
-          totalEpisodes += Object.keys(cleanStorageEps).length;
-          await this.saveAnimeToFirestoreBg(anime);
-        }
+        anime.episodes = norm;
+        totalEpisodes += norm.length;
       }
+      migratedAnimes++;
+      await this.saveAnimeToFirestoreBg(anime);
     }
 
     this.saveLocal();
@@ -2406,30 +2432,42 @@ class DBService {
 
       for (let idx = 0; idx < animes.length; idx++) {
         const a = animes[idx];
-        // Keep coverData inside Firestore up to 700KB so covers are always available in Firestore
-        const coverPayload = (a.coverData && a.coverData.length < 700000) ? a.coverData : null;
-        const animePayload = {
+        const resolvedImg = String(a.image || a.coverUrl || '').trim();
+        const isExternalImg = /^https?:\/\//i.test(resolvedImg);
+        const coverPayload = (!isExternalImg && a.coverData && a.coverData.startsWith('data:image/') && a.coverData.length < 700000) ? a.coverData : null;
+        const sIds = (a.studioIds && a.studioIds.length > 0) ? a.studioIds : (a.studioId ? [a.studioId] : []);
+        const contIds = Array.isArray(a.continuationAnimeIds) ? a.continuationAnimeIds.map(String).filter(Boolean) : [];
+        const relMonth = a.releaseMonth ? String(a.releaseMonth).trim() : '';
+
+        const animePayload: Record<string, any> = {
           id: a.id,
           name: a.name,
-          image: a.image,
-          coverData: coverPayload,
+          image: resolvedImg,
           year: a.year || '',
-          releaseMonth: a.releaseMonth || '',
           telegramUrl: a.telegramUrl || '',
           episodes: serializeEpisodesForStorage(a.episodes || []),
-          studioId: a.studioId || '',
-          studioIds: a.studioIds || [],
+          studioIds: sIds.map(String),
           genreIds: a.genreIds || [],
           status: a.status || 'Finalizado',
           description: a.description || '',
-          continuationType: a.continuationType || '',
-          continuationAnimeIds: Array.isArray(a.continuationAnimeIds) ? a.continuationAnimeIds.map(String) : [],
           hidden: Boolean(a.hidden),
           downloads: Number(a.downloads) || 0,
           orderIndex: typeof a.orderIndex === 'number' ? a.orderIndex : idx,
           createdAt: a.createdAt,
           updatedAt: a.updatedAt
         };
+        if (coverPayload) {
+          animePayload.coverData = coverPayload;
+        }
+        if (relMonth) {
+          animePayload.releaseMonth = relMonth;
+        }
+        if (contIds.length > 0) {
+          animePayload.continuationAnimeIds = contIds;
+          if (a.continuationType) {
+            animePayload.continuationType = String(a.continuationType);
+          }
+        }
 
         const estimatedSize = Buffer.byteLength(JSON.stringify(animePayload), 'utf-8');
 
@@ -4244,12 +4282,15 @@ app.post('/api/animes', authRequired, async (req, res) => {
     const cleanContIds = Array.isArray(continuationAnimeIds) ? continuationAnimeIds.map(String).filter(Boolean) : [];
     const finalContType = cleanContIds.length > 0 ? formatContinuationTitle(continuationType, cleanContIds.length) : '';
 
+    const resolvedCoverUrl =
+      (coverUrl && typeof coverUrl === 'string' && /^https?:\/\//i.test(coverUrl.trim()) ? coverUrl.trim() : '') ||
+      (image && typeof image === 'string' && /^https?:\/\//i.test(image.trim()) ? image.trim() : '');
+
     const newAnime: Anime = {
       id: 'ani-' + crypto.randomBytes(6).toString('hex'),
       name: name.trim(),
-      image: image || '',
-      coverUrl: coverUrl ? String(coverUrl).trim() : undefined,
-      coverData: coverData || '',
+      image: resolvedCoverUrl || (image || ''),
+      coverData: resolvedCoverUrl ? undefined : (coverData || ''),
       studioId: primaryStudioId,
       studioIds: rawStudioIds,
       genreIds: Array.isArray(genreIds) ? genreIds : [],
@@ -4291,10 +4332,13 @@ app.put('/api/animes/:id', authRequired, async (req, res) => {
       finalImage = '';
     }
 
-    let finalCoverUrl = coverUrl !== undefined ? (coverUrl ? String(coverUrl).trim() : '') : (existing.coverUrl || '');
+    const incomingHttpImage = image && typeof image === 'string' && /^https?:\/\//i.test(image.trim()) ? image.trim() : '';
+    const incomingCoverUrl = coverUrl && typeof coverUrl === 'string' && /^https?:\/\//i.test(coverUrl.trim()) ? coverUrl.trim() : '';
+    let finalCoverUrl = incomingCoverUrl || incomingHttpImage || (coverUrl === '' ? '' : (existing.coverUrl || ''));
     let finalCoverData = existing.coverData || '';
     if (finalCoverUrl) {
       finalCoverData = '';
+      finalImage = finalCoverUrl;
     } else if (coverData && typeof coverData === 'string' && coverData.startsWith('data:image/')) {
       finalCoverData = coverData;
     } else if (image && typeof image === 'string' && image.startsWith('data:image/')) {
@@ -4321,8 +4365,7 @@ app.put('/api/animes/:id', authRequired, async (req, res) => {
       id,
       name: name ? name.trim() : existing.name,
       image: finalImage,
-      coverUrl: finalCoverUrl || undefined,
-      coverData: finalCoverData || undefined,
+      coverData: finalCoverUrl ? undefined : (finalCoverData || undefined),
       studioId: finalStudioId,
       studioIds: finalStudioIds,
       genreIds: Array.isArray(genreIds) ? genreIds : existing.genreIds,
@@ -4331,23 +4374,23 @@ app.put('/api/animes/:id', authRequired, async (req, res) => {
       releaseMonth: releaseMonth !== undefined ? String(releaseMonth).trim() : existing.releaseMonth,
       description: description !== undefined ? description : existing.description,
       telegramUrl: telegramUrl !== undefined ? String(telegramUrl).trim() : existing.telegramUrl,
-      episodes: Array.isArray(episodes) ? episodes.map((ep: any, idx: number) => {
+      episodes: Array.isArray(episodes) ? normalizeEpisodesList(episodes.map((ep: any, idx: number) => {
         const epNum = Number(ep.number) || 1;
         const origEp = existing.episodes?.find((e: any) => Number(e.number) === epNum);
         const isNew = ep.isNew !== undefined ? Boolean(ep.isNew) : Boolean(origEp?.isNew);
         const addedToRecentAt = isNew ? (ep.addedToRecentAt || origEp?.addedToRecentAt || new Date(Date.now() + idx * 1000).toISOString()) : undefined;
-      const coverImage = 'coverImage' in ep ? (ep.coverImage ? String(ep.coverImage) : undefined) : origEp?.coverImage;
-      const thumbnail = 'thumbnail' in ep ? (ep.thumbnail ? String(ep.thumbnail) : undefined) : origEp?.thumbnail;
+        const coverImage = 'coverImage' in ep ? (ep.coverImage ? String(ep.coverImage) : undefined) : origEp?.coverImage;
+        const thumbnail = 'thumbnail' in ep ? (ep.thumbnail ? String(ep.thumbnail) : undefined) : origEp?.thumbnail;
         return {
-          ...(origEp || {}),
-          ...ep,
           number: epNum,
+          mp4Url: getEpisodeUrl(ep) || getEpisodeUrl(origEp),
           isNew,
           addedToRecentAt,
           coverImage,
-          thumbnail
+          thumbnail,
+          title: ep.title ?? origEp?.title,
         };
-      }) : existing.episodes,
+      })) : existing.episodes,
       continuationType: finalContinuationType || undefined,
       continuationAnimeIds: finalContinuationIds && finalContinuationIds.length > 0 ? finalContinuationIds : [],
       hidden: hidden !== undefined ? !!hidden : existing.hidden,
@@ -4376,7 +4419,7 @@ app.post('/api/admin/anime/:id/episodes', async (req, res) => {
     if (!existing) return res.status(404).json({ error: 'Anime no encontrado' });
 
     let processedEpisodes = Array.isArray(episodes) ? episodes : [];
-    processedEpisodes = processedEpisodes.map((ep: any) => {
+    processedEpisodes = normalizeEpisodesList(processedEpisodes.map((ep: any) => {
       const epNum = Number(ep.number) || 1;
       const existingEp = existing.episodes?.find((e: any) => Number(e.number) === epNum);
       const isNew = Boolean(ep.isNew);
@@ -4388,15 +4431,15 @@ app.post('/api/admin/anime/:id/episodes', async (req, res) => {
       const finalThumb = 'thumbnail' in ep ? (ep.thumbnail ? String(ep.thumbnail) : undefined) : (existingEp?.thumbnail || undefined);
 
       return {
-        ...(existingEp || {}),
-        ...ep,
         number: epNum,
+        mp4Url: getEpisodeUrl(ep) || getEpisodeUrl(existingEp),
         isNew,
         addedToRecentAt,
         coverImage: finalCover,
-        thumbnail: finalThumb
+        thumbnail: finalThumb,
+        title: ep.title ?? existingEp?.title,
       };
-    });
+    }));
 
     const updated: Anime = {
       ...existing,

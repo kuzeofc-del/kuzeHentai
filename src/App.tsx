@@ -81,7 +81,7 @@ const computeCatalogSignature = (list: Anime[]): string => {
     .sort((a, b) => String(a.id).localeCompare(String(b.id)))
     .map((a) => {
       const epsSig = (a.episodes || [])
-        .map((e) => `${e.number}:${Boolean(e.isNew)}:${e.addedToRecentAt || ''}:${e.videoUrl || ''}:${fingerprintMediaString(e.thumbnail || e.coverImage)}`)
+        .map((e) => `${e.number}:${Boolean(e.isNew)}:${e.addedToRecentAt || ''}:${e.mp4Url || ''}:${fingerprintMediaString(e.thumbnail || e.coverImage)}`)
         .join(',');
       return `${a.id}|${a.name}|${a.status || ''}|${a.releaseMonth || ''}|${a.year || ''}|${Boolean(a.hidden)}|${a.downloads || 0}|${a.updatedAt || ''}|${a.continuationType || ''}|${(a.continuationAnimeIds || []).join(',')}|${fingerprintMediaString(a.coverData)}|${fingerprintMediaString(a.image)}|${(a.genreIds || []).join(',')}|${(a.studioIds || []).join(',')}|${epsSig}`;
     })
@@ -958,17 +958,24 @@ export default function App() {
       if ((!loadedAnimes || loadedAnimes.length === 0) && db && isFirebaseConfigured) {
         const mapFirestoreAnimeDoc = (docSnap: any): Anime => {
           const d = docSnap.data();
+          const resolvedImage = String(d.image || d.coverUrl || '');
+          const hasExternalUrl = /^https?:\/\//i.test(resolvedImage);
+          const resolvedStudioIds: string[] = Array.isArray(d.studioIds)
+            ? d.studioIds.map(String).filter(Boolean)
+            : (d.studioId ? [String(d.studioId)] : []);
           return {
             id: String(d.id || docSnap.id),
             name: d.name || '',
-            image: d.image || '',
-            coverData: d.coverData || (d.image && typeof d.image === 'string' && d.image.startsWith('data:') ? d.image : undefined),
+            image: resolvedImage,
+            coverData: hasExternalUrl
+              ? undefined
+              : (d.coverData || (resolvedImage.startsWith('data:') ? resolvedImage : undefined)),
             year: d.year ? normalizeAnimeYear(d.year) : '',
             releaseMonth: d.releaseMonth || d.release_month || '',
             telegramUrl: d.telegramUrl || '',
             episodes: normalizeEpisodesList(d.episodes),
-            studioId: d.studioId || '',
-            studioIds: d.studioIds || (d.studioId ? [d.studioId] : []),
+            studioId: d.studioId || resolvedStudioIds[0] || '',
+            studioIds: resolvedStudioIds,
             genreIds: d.genreIds || [],
             status: d.status || 'Finalizado',
             description: d.description || '',
@@ -1255,17 +1262,24 @@ export default function App() {
               .then((snap) => {
                 if (snap && snap.exists()) {
                   const d = snap.data();
+                  const resolvedImage = String(d.image || d.coverUrl || '');
+                  const hasExternalUrl = /^https?:\/\//i.test(resolvedImage);
+                  const resolvedStudioIds: string[] = Array.isArray(d.studioIds)
+                    ? d.studioIds.map(String).filter(Boolean)
+                    : (d.studioId ? [String(d.studioId)] : []);
                   const singleAnime: Anime = {
                     id: String(d.id || snap.id),
                     name: d.name || '',
-                    image: d.image || '',
-                    coverData: d.coverData || (d.image && typeof d.image === 'string' && d.image.startsWith('data:') ? d.image : undefined),
+                    image: resolvedImage,
+                    coverData: hasExternalUrl
+                      ? undefined
+                      : (d.coverData || (resolvedImage.startsWith('data:') ? resolvedImage : undefined)),
                     year: d.year ? normalizeAnimeYear(d.year) : '',
                     releaseMonth: d.releaseMonth || d.release_month || '',
                     telegramUrl: d.telegramUrl || '',
                     episodes: normalizeEpisodesList(d.episodes),
-                    studioId: d.studioId || '',
-                    studioIds: d.studioIds || (d.studioId ? [d.studioId] : []),
+                    studioId: d.studioId || resolvedStudioIds[0] || '',
+                    studioIds: resolvedStudioIds,
                     genreIds: d.genreIds || [],
                     status: d.status || 'Finalizado',
                     description: d.description || '',

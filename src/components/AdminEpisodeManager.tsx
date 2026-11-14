@@ -19,8 +19,10 @@ import {
 } from '../utils/searchUtils';
 import {
   enforceEpisodesRotation,
-  enforceEpisodesRotationInFirestore
+  enforceEpisodesRotationInFirestore,
+  sanitizeEpisodeForFirestore
 } from '../utils/episodeRotation';
+import { getEpisodeUrl } from '../utils/episodeUtils';
 import { useAppTheme } from '../lib/theme';
 import { bumpFirestoreConfigVersion } from '../lib/versionSync';
 
@@ -145,7 +147,7 @@ export const AdminEpisodeManager: React.FC<AdminEpisodeManagerProps> = ({
           episode: ep,
           episodeNumber: epNum,
           coverImage: ep.thumbnail || ep.coverImage || anime.coverData || anime.image,
-          mp4Url: ep.mp4Url || ep.telegramUrl,
+          mp4Url: getEpisodeUrl(ep),
           timestamp: epTimestamp,
           studioName,
         });
@@ -193,7 +195,7 @@ export const AdminEpisodeManager: React.FC<AdminEpisodeManagerProps> = ({
     const eps: Episode[] = Array.isArray(anime.episodes) ? anime.episodes : [];
     const targetEp = eps.find(e => Number(e.number) === epNumber);
 
-    const defaultLink = targetEp?.mp4Url || targetEp?.telegramUrl || targetEp?.url || (epNumber === 1 ? anime.telegramUrl || '' : '');
+    const defaultLink = getEpisodeUrl(targetEp) || (epNumber === 1 ? anime.telegramUrl || '' : '');
     const isNew = Boolean(targetEp?.isNew);
 
     setEditingEpisode({
@@ -311,7 +313,7 @@ export const AdminEpisodeManager: React.FC<AdminEpisodeManagerProps> = ({
     try {
       const existing: Episode[] = Array.isArray(selectedAnime.episodes) && selectedAnime.episodes.length > 0
         ? [...selectedAnime.episodes]
-        : (selectedAnime.telegramUrl ? [{ number: 1, mp4Url: selectedAnime.telegramUrl, telegramUrl: selectedAnime.telegramUrl, isNew: false }] : []);
+        : (selectedAnime.telegramUrl ? [{ number: 1, mp4Url: selectedAnime.telegramUrl, isNew: false }] : []);
 
       const cleanLink = String(editingEpisode.mp4Url || '').trim();
       const targetIdx = existing.findIndex(e => Number(e.number) === selectedEpNumber);
@@ -326,7 +328,6 @@ export const AdminEpisodeManager: React.FC<AdminEpisodeManagerProps> = ({
       const updatedItem: Episode = {
         number: selectedEpNumber,
         mp4Url: cleanLink,
-        telegramUrl: cleanLink,
         isNew: Boolean(editingEpisode.isNew),
         addedToRecentAt: finalAddedToRecentAt,
         thumbnail: thumbVal,
@@ -346,11 +347,7 @@ export const AdminEpisodeManager: React.FC<AdminEpisodeManagerProps> = ({
       }
       existing.sort((a, b) => Number(a.number) - Number(b.number));
 
-      const cleanExisting = existing.map(ep => {
-        const copy: Record<string, any> = { ...ep };
-        Object.keys(copy).forEach(k => copy[k] === undefined && delete copy[k]);
-        return copy as Episode;
-      });
+      const cleanExisting = existing.map(ep => sanitizeEpisodeForFirestore(ep));
 
       setEpProgress({
         title: `Guardando Episodio #${selectedEpNumber}`,

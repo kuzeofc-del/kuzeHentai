@@ -6,7 +6,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { User } from 'firebase/auth';
-import { db, doc, setDoc, deleteDoc, updateDoc, collection, getDocs, isFirebaseConfigured } from '../lib/firebase';
+import { db, auth, doc, setDoc, deleteDoc, updateDoc, collection, getDocs, getDocsFromServer, deleteField, isFirebaseConfigured } from '../lib/firebase';
 import { Studio, Genre, Anime, DatabaseSchema, getNormalizedKey, normalizeAnimeYear, resolveContinuationGroup, sortAnimesByYearAsc, formatContinuationTitle } from '../types';
 import { SmartAnimeCover, getFallbackSvg, globalCoverDataMap } from '../utils/imageFallback';
 import { 
@@ -26,7 +26,7 @@ import AdminEpisodeManager from './AdminEpisodeManager';
 import AdminAnnouncementManager from './AdminAnnouncementManager';
 import { getAnimeRatingStats } from '../utils/ratingManager';
 import { enforceEpisodesRotationInFirestore, sanitizeEpisodeForFirestore } from '../utils/episodeRotation';
-import { normalizeEpisodesList } from '../utils/episodeUtils';
+import { normalizeEpisodesList, getEpisodeUrl, cleanEpisodeForStorage } from '../utils/episodeUtils';
 import { useAppTheme } from '../lib/theme';
 
 interface AdminPanelProps {
@@ -153,11 +153,12 @@ function useCoverSizeInfo(src?: string | null) {
     }
 
     let cancelled = false;
-    fetch(trimmed)
+    fetch(trimmed, { mode: 'cors' })
       .then(async (res) => {
         if (!res.ok) return null;
         const blob = await res.blob();
-        const bytes = blob.size;
+        const headerBytes = Number(res.headers.get('content-length')) || 0;
+        const bytes = blob.size || headerBytes;
         if (!bytes) return null;
         const format = detectImageFormat(trimmed, blob.type);
         const result = {
@@ -183,13 +184,32 @@ function useCoverSizeInfo(src?: string | null) {
   return info;
 }
 
-function CoverPreviewSizeBadge({ src }: { src?: string | null }) {
+function CoverPreviewSizeBadge({ src, showSourceType = false }: { src?: string | null; showSourceType?: boolean }) {
   const info = useCoverSizeInfo(src);
-  if (!info) return null;
+  const trimmed = (src || '').trim();
+  const isExternalUrl = /^https?:\/\//i.test(trimmed);
+  const sourceTypeLabel = showSourceType && trimmed ? (isExternalUrl ? 'URL' : 'Imagen') : null;
+
+  if (!info && !sourceTypeLabel) return null;
   return (
-    <div className="absolute top-2 left-2 px-1.5 py-0.5 rounded bg-black/75 backdrop-blur-xs border border-purple-500/40 text-[8.5px] font-mono text-purple-300 z-10 font-bold tracking-tight flex items-center gap-1 shadow-sm pointer-events-none">
-      <span>{info.sizeText}</span>
-      <span className="opacity-75">· {info.format}</span>
+    <div className="absolute top-2 left-2 z-10 flex items-center gap-1.5 pointer-events-none">
+      {info && (
+        <div className="px-1.5 py-0.5 rounded bg-black/75 backdrop-blur-xs border border-purple-500/40 text-[8.5px] font-mono text-purple-300 font-bold tracking-tight flex items-center gap-1 shadow-sm">
+          <span>{info.sizeText}</span>
+          <span className="opacity-75">· {info.format}</span>
+        </div>
+      )}
+      {sourceTypeLabel && (
+        <div
+          className={`px-1.5 py-0.5 rounded bg-black/80 backdrop-blur-xs border text-[8.5px] font-mono font-bold tracking-wider uppercase shadow-sm ${
+            isExternalUrl
+              ? 'border-cyan-400/50 text-cyan-300'
+              : 'border-emerald-400/50 text-emerald-300'
+          }`}
+        >
+          {sourceTypeLabel}
+        </div>
+      )}
     </div>
   );
 }
@@ -413,6 +433,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
   const [editingAnime, setEditingAnime] = useState<Anime | null>(null);
   const [animeName, setAnimeName] = useState('');
   const [animeImage, setAnimeImage] = useState('');
+  const [animeCoverUrlInput, setAnimeCoverUrlInput] = useState('');
   const [isImageOptimized, setIsImageOptimized] = useState(false);
   const [animeStudioId, setAnimeStudioId] = useState('');
   const [animeStudioSearch, setAnimeStudioSearch] = useState('');
@@ -506,7 +527,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
   const [singleEpIsNew, setSingleEpIsNew] = useState<boolean>(false);
   const [animeEpisodes, setAnimeEpisodes] = useState<{
     number: number;
-    telegramUrl: string;
+    mp4Url: string;
     isNew?: boolean;
     addedToRecentAt?: string;
     coverImage?: string;
@@ -717,7 +738,6 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
           const isNewEp = item.isNew !== false;
           const epObj: Record<string, any> = {
             number: Number(item.number) || 1,
-            telegramUrl: item.url.trim(),
             mp4Url: item.url.trim(),
             isNew: isNewEp,
             ...(isNewEp ? { addedToRecentAt: new Date(Date.now() + idx * 1000).toISOString() } : {}),
@@ -727,7 +747,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
           return epObj;
         }).sort((a, b) => a.number - b.number);
 
-        const firstUrl = episodesPayload[0]?.telegramUrl || '';
+        const firstUrl = episodesPayload[0]?.mp4Url || '';
 
         const payload = {
           name: animeTitle,
@@ -814,31 +834,32 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
           const existingIndex = existingEps.findIndex(e => e.number === epNum);
 
           if (existingIndex >= 0) {
-            const updatedEp: Record<string, any> = {
+            const updatedEp = sanitizeEpisodeForFirestore({
               ...existingEps[existingIndex],
-              mp4Url: epUrlClean,
-              telegramUrl: epUrlClean,
-              isNew: isNewEp,
-              addedToRecentAt: isNewEp ? new Date(Date.now() + idx * 1000).toISOString() : undefined,
-            };
-            if (item.coverImage !== undefined) updatedEp.coverImage = item.coverImage;
-            if (item.thumbnail !== undefined) updatedEp.thumbnail = item.thumbnail;
-            Object.keys(updatedEp).forEach(k => updatedEp[k] === undefined && delete updatedEp[k]);
-            existingEps[existingIndex] = updatedEp as any;
-          } else {
-            const newEp: Record<string, any> = {
               number: epNum,
               mp4Url: epUrlClean,
-              telegramUrl: epUrlClean,
+              isNew: isNewEp,
+              addedToRecentAt: isNewEp ? new Date(Date.now() + idx * 1000).toISOString() : undefined,
+              ...(item.coverImage !== undefined ? { coverImage: item.coverImage } : {}),
+              ...(item.thumbnail !== undefined ? { thumbnail: item.thumbnail } : {}),
+            });
+            existingEps[existingIndex] = updatedEp;
+          } else {
+            const newEp = sanitizeEpisodeForFirestore({
+              number: epNum,
+              mp4Url: epUrlClean,
               isNew: isNewEp,
               ...(isNewEp ? { addedToRecentAt: new Date(Date.now() + idx * 1000).toISOString() } : {}),
-            };
-            if (item.coverImage !== undefined) newEp.coverImage = item.coverImage;
-            if (item.thumbnail !== undefined) newEp.thumbnail = item.thumbnail;
-            existingEps.push(newEp as any);
+              ...(item.coverImage !== undefined ? { coverImage: item.coverImage } : {}),
+              ...(item.thumbnail !== undefined ? { thumbnail: item.thumbnail } : {}),
+            });
+            existingEps.push(newEp);
           }
         });
 
+        existingEps.forEach((ep, i) => {
+          existingEps[i] = sanitizeEpisodeForFirestore(ep);
+        });
         existingEps.sort((a, b) => a.number - b.number);
 
         const payload = {
@@ -1138,7 +1159,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
       // Episode video URLs
       if (a.episodes && Array.isArray(a.episodes)) {
         a.episodes.forEach(ep => {
-          const normEpUrl = (ep.telegramUrl || '').trim().toLowerCase();
+          const normEpUrl = getEpisodeUrl(ep).toLowerCase();
           if (normEpUrl && normEpUrl.length > 5) {
             if (!episodeUrls.has(normEpUrl)) episodeUrls.set(normEpUrl, []);
             episodeUrls.get(normEpUrl)!.push({ anime: a, epNumber: ep.number });
@@ -1974,6 +1995,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
     setEditingAnime(null);
     setAnimeName('');
     setAnimeImage('');
+    setAnimeCoverUrlInput('');
     setAnimeStudioId(lastUsedStudio.id);
     setAnimeStudioSearch(lastUsedStudio.search);
     setAnimeGenreIds([]);
@@ -2002,7 +2024,12 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
   const openEditAnimeForm = (anime: Anime) => {
     setEditingAnime(anime);
     setAnimeName(anime.name);
-    setAnimeImage((anime.coverData && anime.coverData.startsWith('data:image/')) ? anime.coverData : anime.image);
+    const hasExternalUrl = Boolean(anime.image && /^https?:\/\//i.test(anime.image.trim()));
+    const initialCover = hasExternalUrl
+      ? anime.image.trim()
+      : ((anime.coverData && anime.coverData.startsWith('data:image/')) ? anime.coverData : (anime.image || ''));
+    setAnimeImage(initialCover);
+    setAnimeCoverUrlInput(hasExternalUrl ? anime.image.trim() : '');
     setIsImageOptimized(false);
     
     const sIds = (anime.studioIds && anime.studioIds.length > 0)
@@ -2049,7 +2076,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
     if (anime.episodes && anime.episodes.length > 0) {
       setAnimeEpisodes(anime.episodes.map(ep => ({
         number: Number(ep.number) || 1,
-        telegramUrl: String(ep.telegramUrl || ep.url || ep.videoUrl || ep.mp4Url || ep.link || '').trim(),
+        mp4Url: getEpisodeUrl(ep),
         isNew: Boolean(ep.isNew),
         addedToRecentAt: ep.addedToRecentAt,
         coverImage: ep.coverImage,
@@ -2131,7 +2158,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
     const nextNum = animeEpisodes.length > 0
       ? Math.max(...animeEpisodes.map(ep => Number(ep.number) || 0)) + 1
       : 1;
-    setAnimeEpisodes(prev => [...prev, { number: nextNum, telegramUrl: '', isNew: false }]);
+    setAnimeEpisodes(prev => [...prev, { number: nextNum, mp4Url: '', isNew: false }]);
   };
 
   const handleAddMultipleEpisodes = (count: number) => {
@@ -2144,7 +2171,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
         : 1;
       const newEps = [];
       for (let i = 0; i < toAdd; i++) {
-        newEps.push({ number: nextNum + i, telegramUrl: '', isNew: false });
+        newEps.push({ number: nextNum + i, mp4Url: '', isNew: false });
       }
       return [...prev, ...newEps];
     });
@@ -2164,7 +2191,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
     const urlVal = value.trim();
     setAnimeEpisodes(prev => {
       const updated = [...prev];
-      updated[index] = { ...updated[index], telegramUrl: value };
+      updated[index] = { ...updated[index], mp4Url: value };
 
       // Ensure the input element shows the tail end of the link
       setTimeout(() => {
@@ -2177,7 +2204,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
       // If a link/URL is pasted or entered
       if (urlVal.length > 8 || urlVal.startsWith('http') || urlVal.includes('archive.org')) {
         // Look for subsequent empty chapter fields after index
-        const nextEmptyIdx = updated.findIndex((ep, i) => i > index && (!ep.telegramUrl || ep.telegramUrl.trim() === ''));
+        const nextEmptyIdx = updated.findIndex((ep, i) => i > index && (!ep.mp4Url || ep.mp4Url.trim() === ''));
         
         if (nextEmptyIdx !== -1) {
           // There are still empty chapter fields AFTER this index!
@@ -2191,7 +2218,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
           }, 30);
         } else {
           // Check if there are ANY other empty chapter fields anywhere in the list
-          const anyEmptyIdx = updated.findIndex((ep, i) => i !== index && (!ep.telegramUrl || ep.telegramUrl.trim() === ''));
+          const anyEmptyIdx = updated.findIndex((ep, i) => i !== index && (!ep.mp4Url || ep.mp4Url.trim() === ''));
           if (anyEmptyIdx !== -1) {
             setTimeout(() => {
               const anyEl = episodeInputRefs.current[anyEmptyIdx];
@@ -2297,6 +2324,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
         if (rawBase64) {
           // Sin optimización: se conserva la imagen 100% original
           setAnimeImage(rawBase64);
+          setAnimeCoverUrlInput('');
           setIsImageOptimized(false);
         }
         setImageUploadLoading(false);
@@ -2518,7 +2546,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
 
       let cleanEpisodes = animeEpisodes
         .map((ep, idx) => {
-          const link = String(ep.telegramUrl || '').trim();
+          const link = String(ep.mp4Url || '').trim();
           const epNum = Number(ep.number) || 1;
           const origEp = editingAnime?.episodes?.find((e: any) => Number(e.number) === epNum);
           const isNew = Boolean(ep.isNew);
@@ -2530,11 +2558,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
 
           const epRecord: Record<string, any> = {
             number: epNum,
-            telegramUrl: link,
-            url: link,
-            videoUrl: link,
             mp4Url: link,
-            link: link,
             isNew,
           };
           if (isNew) {
@@ -2545,18 +2569,14 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
           if (preservedTitle !== undefined) epRecord.title = preservedTitle;
           return epRecord;
         })
-        .filter(ep => ep.telegramUrl !== '');
+        .filter(ep => ep.mp4Url !== '');
 
       const primaryTelegramUrl = isUpcomingForm ? '' : animeTelegramUrl.trim();
 
       if (cleanEpisodes.length === 0 && singleEpIsNew && primaryTelegramUrl) {
         const singleEp: Record<string, any> = {
           number: 1,
-          telegramUrl: primaryTelegramUrl,
-          url: primaryTelegramUrl,
-          videoUrl: primaryTelegramUrl,
           mp4Url: primaryTelegramUrl,
-          link: primaryTelegramUrl,
           isNew: true,
           addedToRecentAt: editingAnime?.episodes?.[0]?.addedToRecentAt || new Date().toISOString(),
         };
@@ -2566,7 +2586,6 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
         cleanEpisodes = [singleEp];
       }
 
-      const finalCover = animeImage;
       const finalStatus = animeStatus || 'Finalizado';
 
       const isUpcomingStr = (st?: string) => {
@@ -2596,18 +2615,24 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
 
       const resolvedReleaseMonth = isUpcomingForm ? animeReleaseMonth.trim() : '';
 
-      const cleanContinuationIds = Array.from(
-        new Set(animeContinuationIds.filter(id => id && id !== editingAnime?.id))
+      const cleanContinuationIds: string[] = Array.from(
+        new Set<string>(animeContinuationIds.filter((id): id is string => Boolean(id && id !== editingAnime?.id)))
       );
       const effectiveContinuationType =
         cleanContinuationIds.length > 0
           ? formatContinuationTitle(animeContinuationType, cleanContinuationIds.length)
           : '';
 
+      const trimmedCoverInput = animeCoverUrlInput.trim();
+      const finalCover = (/^https?:\/\//i.test(trimmedCoverInput) ? trimmedCoverInput : animeImage).trim();
+      const isExternalCoverUrl = /^https?:\/\//i.test(finalCover);
+      const isBase64Input = finalCover.startsWith('data:image/');
+
       const payload = {
         name: trimmedName,
         image: finalCover,
-        coverData: finalCover.startsWith('data:image/') ? finalCover : (editingAnime?.coverData || ''),
+        coverData: isExternalCoverUrl ? '' : (isBase64Input ? finalCover : ''),
+        removeImage: !finalCover,
         studioId: primaryStudioId,
         studioIds: targetStudioIds,
         genreIds: targetGenreIds,
@@ -2692,8 +2717,8 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
             await setDoc(
               doc(db, 'animes', remId),
               {
-                continuationType: nextRemType,
-                continuationAnimeIds: remainingIds,
+                continuationType: remainingIds.length > 0 ? nextRemType : deleteField(),
+                continuationAnimeIds: remainingIds.length > 0 ? remainingIds : deleteField(),
                 updatedAt: nowIso
               },
               { merge: true }
@@ -2721,28 +2746,45 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
         const targetId = editingAnime
           ? editingAnime.id
           : (payload.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || ('anime-' + Date.now()));
-        const rawCover = finalCover || editingAnime?.coverData || editingAnime?.image || '';
+        const rawCover = finalCover;
         const safeCover = await ensureFirestoreSafeImage(rawCover);
         const isBase64Cover = safeCover.startsWith('data:image/');
+        const nowIso = new Date().toISOString();
 
-        // En Firestore guardamos la cadena base64 únicamente en `coverData` (y en `image` la ruta ligera)
-        // para nunca duplicar el peso de la imagen dentro del documento de 1 MiB de Firestore.
+        // En Firestore: si es portada URL externa (Cloudinary) eliminamos cualquier coverData Base64 previo
+        // y mantenemos el documento organizado sin campos redundantes ni vacíos (conservando telegramUrl).
         if (!db) {
           throw new Error('No hay base de datos Firebase conectada.');
         }
-        const fsData = {
-          ...payload,
+        if (isExternalCoverUrl || !isBase64Cover) {
+          globalCoverDataMap.delete(targetId);
+        }
+
+        const fsWriteData: Record<string, any> = {
           id: targetId,
+          name: trimmedName,
           image: isBase64Cover ? `/api/covers/${targetId}.webp` : safeCover,
-          coverData: isBase64Cover ? safeCover : (editingAnime?.coverData || ''),
-          releaseMonth: resolvedReleaseMonth,
-          createdAt: effectiveCreatedAt,
-          updatedAt: new Date().toISOString(),
+          coverData: isBase64Cover ? safeCover : deleteField(),
+          coverUrl: deleteField(),
+          studioId: deleteField(),
+          studioIds: targetStudioIds,
+          genreIds: targetGenreIds,
+          status: finalStatus,
+          year: normalizeAnimeYear(animeYear),
+          releaseMonth: resolvedReleaseMonth ? resolvedReleaseMonth : deleteField(),
+          description: animeDescription,
+          telegramUrl: primaryTelegramUrl,
+          episodes: cleanEpisodes,
+          continuationType: effectiveContinuationType ? effectiveContinuationType : deleteField(),
+          continuationAnimeIds: cleanContinuationIds.length > 0 ? cleanContinuationIds : deleteField(),
+          hidden: animeHidden,
           downloads: editingAnime?.downloads || 0,
-          storageLocation: 'Firebase Firestore',
-          savedInFirestore: true
+          createdAt: effectiveCreatedAt,
+          updatedAt: nowIso,
+          storageLocation: deleteField(),
+          savedInFirestore: deleteField()
         };
-        await setDoc(doc(db, 'animes', targetId), fsData, { merge: true });
+        await setDoc(doc(db, 'animes', targetId), fsWriteData, { merge: true });
         setLiveProgress({
           title: opTitle,
           detail: `Verificando rotación de episodios...`,
@@ -2751,7 +2793,29 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
           total: 5,
           unit: 'etapas'
         });
-        const savedAnimeObj = fsData as unknown as Anime;
+        const savedAnimeObj: Anime = {
+          id: targetId,
+          name: trimmedName,
+          image: isBase64Cover ? `/api/covers/${targetId}.webp` : safeCover,
+          coverData: isBase64Cover ? safeCover : undefined,
+          studioId: primaryStudioId,
+          studioIds: targetStudioIds,
+          genreIds: targetGenreIds,
+          status: finalStatus,
+          year: normalizeAnimeYear(animeYear),
+          releaseMonth: resolvedReleaseMonth,
+          description: animeDescription,
+          telegramUrl: primaryTelegramUrl,
+          episodes: cleanEpisodes as any,
+          continuationType: effectiveContinuationType || undefined,
+          continuationAnimeIds: cleanContinuationIds.length > 0 ? cleanContinuationIds : undefined,
+          hidden: animeHidden,
+          downloads: editingAnime?.downloads || 0,
+          createdAt: effectiveCreatedAt,
+          updatedAt: nowIso,
+          storageLocation: 'Firebase Firestore',
+          savedInFirestore: true
+        };
         const updatedPeers = await syncContinuationPeers(savedAnimeObj).catch(() => [] as Anime[]);
         const mergedList = editingAnime
           ? animes.map(a => (a.id === savedAnimeObj.id ? savedAnimeObj : a))
@@ -2806,8 +2870,12 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
       if (res && res.ok && contentType.includes('application/json')) {
         const savedAnime = await res.json().catch(() => null);
         if (savedAnime && savedAnime.id) {
+          if (isExternalCoverUrl || !savedAnime.coverData) {
+            globalCoverDataMap.delete(String(savedAnime.id));
+          }
           const resolvedAnime: Anime = {
             ...savedAnime,
+            coverData: isExternalCoverUrl ? undefined : savedAnime.coverData,
             continuationType: effectiveContinuationType,
             continuationAnimeIds: cleanContinuationIds,
             releaseMonth: savedAnime.releaseMonth !== undefined ? savedAnime.releaseMonth : resolvedReleaseMonth
@@ -2866,11 +2934,12 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
         const targetId = editingAnime
           ? editingAnime.id
           : (trimmedName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || ('anime-' + Date.now()));
-        const rawCover = animeImage || editingAnime?.coverData || editingAnime?.image || '';
+        const trimmedFallbackInput = animeCoverUrlInput.trim();
+        const rawCover = (/^https?:\/\//i.test(trimmedFallbackInput) ? trimmedFallbackInput : animeImage).trim();
         const safeCover = await ensureFirestoreSafeImage(rawCover);
         const isBase64Cover = safeCover.startsWith('data:image/');
-        const fallbackContinuationIds = Array.from(
-          new Set(animeContinuationIds.filter(id => id && id !== targetId))
+        const fallbackContinuationIds: string[] = Array.from(
+          new Set<string>(animeContinuationIds.filter((id): id is string => Boolean(id && id !== targetId)))
         );
         const fallbackContinuationType =
           fallbackContinuationIds.length > 0
@@ -2879,33 +2948,67 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
         if (!db) {
           throw new Error('No hay base de datos Firebase conectada.');
         }
-        const fsData = {
+        if (!isBase64Cover) {
+          globalCoverDataMap.delete(targetId);
+        }
+        const nowIso = new Date().toISOString();
+        const fallbackReleaseMonth = isUpcomingForm ? animeReleaseMonth.trim() : '';
+        const fallbackTelegram = isUpcomingForm ? '' : animeTelegramUrl.trim();
+        const fallbackEpisodes = animeEpisodes
+          .map((ep, idx) => sanitizeEpisodeForFirestore({ ...ep, number: Number(ep.number) || (idx + 1) }))
+          .filter(ep => ep.mp4Url !== '');
+
+        const fsWriteData: Record<string, any> = {
           name: trimmedName,
           id: targetId,
           image: isBase64Cover ? `/api/covers/${targetId}.webp` : safeCover,
-          coverData: isBase64Cover ? safeCover : (editingAnime?.coverData || ''),
-          studioId: targetStudioIds[0] || '',
+          coverData: isBase64Cover ? safeCover : deleteField(),
+          coverUrl: deleteField(),
+          studioId: deleteField(),
           studioIds: targetStudioIds,
-          genreIds: [],
+          genreIds: animeGenreIds,
           status: animeStatus || 'Finalizado',
           year: normalizeAnimeYear(animeYear),
-          releaseMonth: isUpcomingForm ? animeReleaseMonth.trim() : '',
+          releaseMonth: fallbackReleaseMonth ? fallbackReleaseMonth : deleteField(),
           description: animeDescription,
-          telegramUrl: isUpcomingForm ? '' : animeTelegramUrl.trim(),
-          episodes: animeEpisodes as any,
-          continuationType: fallbackContinuationType,
-          continuationAnimeIds: fallbackContinuationIds,
+          telegramUrl: fallbackTelegram,
+          episodes: fallbackEpisodes,
+          continuationType: fallbackContinuationType ? fallbackContinuationType : deleteField(),
+          continuationAnimeIds: fallbackContinuationIds.length > 0 ? fallbackContinuationIds : deleteField(),
           hidden: animeHidden,
-          createdAt: editingAnime?.createdAt || new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
+          createdAt: editingAnime?.createdAt || nowIso,
+          updatedAt: nowIso,
+          downloads: editingAnime?.downloads || 0,
+          storageLocation: deleteField(),
+          savedInFirestore: deleteField()
+        };
+        await setDoc(doc(db, 'animes', targetId), fsWriteData, { merge: true });
+        const savedFallbackAnime: Anime = {
+          name: trimmedName,
+          id: targetId,
+          image: isBase64Cover ? `/api/covers/${targetId}.webp` : safeCover,
+          coverData: isBase64Cover ? safeCover : undefined,
+          studioId: targetStudioIds[0] || '',
+          studioIds: targetStudioIds,
+          genreIds: animeGenreIds,
+          status: animeStatus || 'Finalizado',
+          year: normalizeAnimeYear(animeYear),
+          releaseMonth: fallbackReleaseMonth,
+          description: animeDescription,
+          telegramUrl: fallbackTelegram,
+          episodes: fallbackEpisodes as any,
+          continuationType: fallbackContinuationType || undefined,
+          continuationAnimeIds: fallbackContinuationIds.length > 0 ? fallbackContinuationIds : undefined,
+          hidden: animeHidden,
+          createdAt: editingAnime?.createdAt || nowIso,
+          updatedAt: nowIso,
           downloads: editingAnime?.downloads || 0,
           storageLocation: 'Firebase Firestore',
           savedInFirestore: true
         };
-        await setDoc(doc(db, 'animes', targetId), fsData, { merge: true });
         setIsAnimeFormOpen(false);
         setEditingAnime(null);
-        onRefresh(fsData as unknown as Anime);
+        onRefresh(savedFallbackAnime);
         showNotification('✅ ¡Anime guardado directamente en Firebase Firestore!', 'success');
       } catch (fbErr: any) {
         setAnimeFormError('Error al guardar anime: ' + (fbErr?.message || 'Error de red'));
@@ -3401,7 +3504,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
 
         for (let epIdx = 0; epIdx < rawEps.length; epIdx++) {
           const ep = rawEps[epIdx];
-          const link = String(ep.mp4Url || ep.telegramUrl || ep.url || ep.videoUrl || ep.link || '').trim();
+          const link = getEpisodeUrl(ep);
           const resolvedThumb = ep.thumbnail ? await resolveImageToBase64(ep.thumbnail) : undefined;
           const resolvedEpCover = ep.coverImage ? await resolveImageToBase64(ep.coverImage) : undefined;
           if (resolvedThumb || resolvedEpCover) {
@@ -3411,10 +3514,6 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
             number: Number(ep.number) || (epIdx + 1),
             orderIndex: epIdx,
             mp4Url: link,
-            telegramUrl: link,
-            url: link,
-            videoUrl: link,
-            link: link,
             isNew: Boolean(ep.isNew),
           };
           if (ep.title) epRecord.title = String(ep.title);
@@ -3733,28 +3832,6 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
         }
       }
     });
-  };
-
-  const handleCleanEpisodes = async () => {
-    try {
-      showNotification('Sincronizando y estandarizando episodios en Firebase con únicamente { number, mp4Url }...', 'success');
-      const res = await fetch('/api/admin/clean-episodes', {
-        method: 'POST',
-        headers: apiHeaders
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        onRefresh();
-        showNotification(
-          `Estandarización completada: ${data.migratedAnimesCount} animes y ${data.migratedEpisodesCount} episodios guardados únicamente con "number" y "mp4Url" en Firebase.`,
-          'success'
-        );
-      } else {
-        showNotification(data.error || 'Error al estandarizar episodios.', 'error');
-      }
-    } catch (err) {
-      showNotification('Error de conexión al estandarizar episodios.', 'error');
-    }
   };
 
   const handleOptimizeCovers = async () => {
@@ -4105,14 +4182,10 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
           const cleanEpisodes: any[] = [];
           for (let epIdx = 0; epIdx < normEps.length; epIdx++) {
             const ep = normEps[epIdx];
-            const link = String(ep.mp4Url || ep.telegramUrl || ep.url || ep.videoUrl || ep.link || '').trim();
+            const link = getEpisodeUrl(ep);
             const epObj: Record<string, any> = {
               number: Number(ep.number) || (epIdx + 1),
               mp4Url: link,
-              telegramUrl: link,
-              url: link,
-              videoUrl: link,
-              link: link,
               isNew: Boolean(ep.isNew)
             };
             if (ep.title) epObj.title = String(ep.title);
@@ -4150,30 +4223,40 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
           const createdAt = rawAnime.createdAt || rawAnime.created_at || new Date(Date.now() - 10000000 + orderIdx * 1000).toISOString();
           const updatedAt = rawAnime.updatedAt || rawAnime.updated_at || createdAt || nowIso;
 
+          const resolvedImage = isBase64Cover ? `/api/covers/${animeId}.webp` : safeCover;
+          const isExternalUrlCover = /^https?:\/\//i.test(resolvedImage);
+          const resolvedReleaseMonth = rawAnime.releaseMonth ? String(rawAnime.releaseMonth).trim() : '';
+
           const fsAnimeDoc: Record<string, any> = {
             id: animeId,
             name: animeName,
-            image: isBase64Cover ? `/api/covers/${animeId}.webp` : safeCover,
-            coverData: isBase64Cover ? safeCover : (rawAnime.coverData || ''),
-            studioId: sIds[0] || '',
+            image: resolvedImage,
             studioIds: sIds,
             genreIds: gIds,
             status: String(rawAnime.status || 'Finalizado').trim(),
             year: normalizeAnimeYear(rawAnime.year),
-            releaseMonth: rawAnime.releaseMonth ? String(rawAnime.releaseMonth).trim() : '',
             description: String(rawAnime.description || rawAnime.synopsis || '').trim(),
             telegramUrl: String(rawAnime.telegramUrl || rawAnime.telegram_url || '').trim(),
             episodes: cleanEpisodes,
-            continuationType: finalContType,
-            continuationAnimeIds: contIds,
             hidden: Boolean(rawAnime.hidden),
             downloads: Number(rawAnime.downloads) || 0,
             orderIndex: orderIdx,
             createdAt,
-            updatedAt,
-            storageLocation: 'Firebase Firestore',
-            savedInFirestore: true
+            updatedAt
           };
+
+          if (!isExternalUrlCover && isBase64Cover && safeCover) {
+            fsAnimeDoc.coverData = safeCover;
+          }
+          if (resolvedReleaseMonth) {
+            fsAnimeDoc.releaseMonth = resolvedReleaseMonth;
+          }
+          if (contIds.length > 0) {
+            fsAnimeDoc.continuationAnimeIds = contIds;
+            if (finalContType) {
+              fsAnimeDoc.continuationType = finalContType;
+            }
+          }
 
           try {
             await setDoc(doc(db, 'animes', animeId), fsAnimeDoc);
@@ -4184,11 +4267,11 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
               thumbnail: (ep.thumbnail && ep.thumbnail.length > 50000) ? undefined : ep.thumbnail,
               coverImage: (ep.coverImage && ep.coverImage.length > 50000) ? undefined : ep.coverImage
             }));
-            await setDoc(doc(db, 'animes', animeId), {
-              ...fsAnimeDoc,
-              episodes: leanEpisodes,
-              coverData: (fsAnimeDoc.coverData && fsAnimeDoc.coverData.length > 100000) ? '' : fsAnimeDoc.coverData
-            }, { merge: true }).catch(() => null);
+            const leanDoc: Record<string, any> = { ...fsAnimeDoc, episodes: leanEpisodes };
+            if (typeof leanDoc.coverData === 'string' && leanDoc.coverData.length > 100000) {
+              delete leanDoc.coverData;
+            }
+            await setDoc(doc(db, 'animes', animeId), leanDoc).catch(() => null);
           }
         }
 
@@ -4942,7 +5025,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                       {animeImage ? (
                         <>
                           <img src={animeImage} alt="Vista previa" className="absolute inset-0 w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" />
-                          <CoverPreviewSizeBadge src={animeImage} />
+                          <CoverPreviewSizeBadge src={animeImage} showSourceType />
                           <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col items-center justify-center gap-2">
                             <Upload className="h-6 w-6 text-white animate-bounce" />
                             <span className="font-mono text-[9px] text-white uppercase tracking-wider">Subir otra imagen</span>
@@ -4952,6 +5035,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                             onClick={(e) => {
                               e.stopPropagation(); // Avoid triggering file input click
                               setAnimeImage('');
+                              setAnimeCoverUrlInput('');
                               setIsImageOptimized(false);
                             }}
                             className="absolute bottom-2 right-2 p-1 px-2 bg-black/80 hover:bg-brand-red text-white text-[9px] font-mono rounded z-10"
@@ -4970,7 +5054,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                       )}
                     </div>
                     
-                    <div className="space-y-2">
+                    <div className="space-y-2.5">
                       <input
                         type="file"
                         accept="image/*"
@@ -4988,6 +5072,46 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                         <Upload className="h-3.5 w-3.5" />
                         {imageUploadLoading ? 'Cargando imagen...' : 'Subir archivo de imagen'}
                       </button>
+
+                      <div className="space-y-1">
+                        <label className="font-mono text-[9px] text-neutral-400 uppercase tracking-widest flex items-center justify-between">
+                          <span>URL de Portada (Cloudinary)</span>
+                          {animeCoverUrlInput && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAnimeCoverUrlInput('');
+                                if (/^https?:\/\//i.test(animeImage.trim())) {
+                                  setAnimeImage('');
+                                }
+                              }}
+                              className="text-[8.5px] text-neutral-500 hover:text-red-400 uppercase tracking-wider cursor-pointer"
+                            >
+                              Limpiar URL
+                            </button>
+                          )}
+                        </label>
+                        <div className="relative">
+                          <LinkIcon className="h-3.5 w-3.5 text-neutral-500 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                          <input
+                            type="url"
+                            value={animeCoverUrlInput}
+                            onChange={(e) => {
+                              const raw = e.target.value;
+                              setAnimeCoverUrlInput(raw);
+                              const trimmed = raw.trim();
+                              if (/^https?:\/\//i.test(trimmed)) {
+                                setAnimeImage(trimmed);
+                                setIsImageOptimized(false);
+                              } else if (!trimmed && /^https?:\/\//i.test(animeImage.trim())) {
+                                setAnimeImage('');
+                              }
+                            }}
+                            placeholder="https://res.cloudinary.com/..."
+                            className="w-full bg-[#050505] border border-dark-border focus:border-cyan-500/60 rounded py-2 pl-8 pr-2.5 text-xs font-mono text-white placeholder-neutral-700 outline-none transition-colors duration-300"
+                          />
+                        </div>
+                      </div>
                     </div>
                   </div>
 
@@ -5431,7 +5555,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                                       ref={(el) => { episodeInputRefs.current[idx] = el; }}
                                       type="url"
                                       required
-                                      value={ep.telegramUrl}
+                                      value={ep.mp4Url}
                                       onChange={(e) => handleEpisodeUrlChange(idx, e.target.value)}
                                       onFocus={() => {
                                         if (isSwipedOpen) {
@@ -5445,7 +5569,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                                           handleEpisodeUrlChange(idx, pasted);
                                         }
                                       }}
-                                      style={{ direction: ep.telegramUrl ? 'rtl' : 'ltr', textAlign: ep.telegramUrl ? 'right' : 'left' }}
+                                      style={{ direction: ep.mp4Url ? 'rtl' : 'ltr', textAlign: ep.mp4Url ? 'right' : 'left' }}
                                       className="w-full h-7 bg-[#0a0a0a] border border-dark-border focus:border-emerald-500 rounded px-2 text-xs text-white placeholder-neutral-700 outline-none truncate font-mono"
                                     />
                                   </div>
@@ -7100,7 +7224,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                           <span>{group.length} coincidencias</span>
                         </div>
                         <p className="font-mono text-[10px] text-neutral-400 truncate bg-black/40 p-1.5 rounded border border-white/5">
-                          {group[0].anime.episodes?.find(e => e.number === group[0].epNumber)?.telegramUrl || 'Enlace'}
+                          {getEpisodeUrl(group[0].anime.episodes?.find(e => e.number === group[0].epNumber)) || 'Enlace'}
                         </p>
                         <div className="flex flex-wrap gap-2 pt-1">
                           {group.map(({ anime: a, epNumber }, i) => (

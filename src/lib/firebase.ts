@@ -36,6 +36,7 @@ import {
   increment,
   getDocFromServer,
   getDocsFromServer,
+  deleteField,
   Firestore,
   CollectionReference
 } from "firebase/firestore";
@@ -186,7 +187,8 @@ export {
   serverTimestamp,
   increment,
   getDocFromServer,
-  getDocsFromServer
+  getDocsFromServer,
+  deleteField
 };
 
 export interface CommentItem {

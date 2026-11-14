@@ -14,6 +14,7 @@ import AnimeRatingModal from './AnimeRatingModal';
 import { getAnimeRatingStats, submitAnimeVote, RatingStats } from '../utils/ratingManager';
 import { auth } from '../lib/firebase';
 import { useAppTheme } from '../lib/theme';
+import { getEpisodeUrl } from '../utils/episodeUtils';
 
 interface AnimeDetailProps {
   anime: Anime;
@@ -335,22 +336,24 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
     if (anime.episodes && anime.episodes.length > 0) {
       const parsed = anime.episodes
         .map(ep => {
-          const videoLink = String(ep.telegramUrl || ep.url || ep.videoUrl || ep.mp4Url || ep.link || '').trim();
+          const videoLink = getEpisodeUrl(ep) || anime.telegramUrl || '';
           return {
-            ...ep,
             number: Number(ep.number) || 1,
-            telegramUrl: videoLink || anime.telegramUrl || '',
-            url: videoLink || anime.telegramUrl || '',
-            videoUrl: videoLink || anime.telegramUrl || '',
-            mp4Url: videoLink || anime.telegramUrl || '',
-            link: videoLink || anime.telegramUrl || ''
+            mp4Url: videoLink,
+            isNew: Boolean(ep.isNew),
+            ...(ep.title ? { title: ep.title } : {}),
+            ...(ep.name ? { name: ep.name } : {}),
+            ...(ep.coverImage ? { coverImage: ep.coverImage } : {}),
+            ...(ep.thumbnail ? { thumbnail: ep.thumbnail } : {}),
+            ...(ep.addedToRecentAt ? { addedToRecentAt: ep.addedToRecentAt } : {}),
+            ...(typeof ep.orderIndex === 'number' ? { orderIndex: ep.orderIndex } : {}),
           };
         })
-        .filter(ep => Boolean(ep.telegramUrl));
+        .filter(ep => Boolean(ep.mp4Url));
       if (parsed.length > 0) return parsed;
     }
     return anime.telegramUrl
-      ? [{ number: 1, telegramUrl: anime.telegramUrl, url: anime.telegramUrl, videoUrl: anime.telegramUrl, mp4Url: anime.telegramUrl, link: anime.telegramUrl }]
+      ? [{ number: 1, mp4Url: anime.telegramUrl }]
       : [];
   }, [anime.episodes, anime.telegramUrl]);
 
@@ -361,10 +364,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
     }
     return displayEpisodes[0] || {
       number: activeEpisodeNum || 1,
-      telegramUrl: anime.telegramUrl || '',
-      url: anime.telegramUrl || '',
       mp4Url: anime.telegramUrl || '',
-      link: anime.telegramUrl || ''
     };
   }, [displayEpisodes, activeEpisodeNum, anime.telegramUrl]);
 
@@ -376,7 +376,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
   // Computed video URL for current episode
   const rawVideoUrl = useMemo(() => {
     if (!currentEpisode) return (anime.telegramUrl || '').trim();
-    return (currentEpisode.telegramUrl || currentEpisode.url || currentEpisode.videoUrl || currentEpisode.mp4Url || currentEpisode.link || anime.telegramUrl || '').trim();
+    return (getEpisodeUrl(currentEpisode) || anime.telegramUrl || '').trim();
   }, [currentEpisode, anime.telegramUrl]);
 
   const isTelegramUrl = useMemo(() => {
@@ -1011,10 +1011,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                     <a
                       href={
                         anime.telegramUrl || 
-                        currentEpisode?.telegramUrl || 
-                        currentEpisode?.videoUrl || 
-                        currentEpisode?.mp4Url || 
-                        currentEpisode?.url || 
+                        getEpisodeUrl(currentEpisode) || 
                         '#'
                       }
                       target="_blank"

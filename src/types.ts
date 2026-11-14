@@ -24,10 +24,6 @@ export interface Genre {
 export interface Episode {
   number: number;
   mp4Url: string;
-  telegramUrl?: string;
-  url?: string;
-  videoUrl?: string;
-  link?: string;
   title?: string;
   name?: string;
   isNew?: boolean;

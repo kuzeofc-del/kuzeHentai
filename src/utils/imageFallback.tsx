@@ -73,9 +73,33 @@ export function persistCoverLocally(animeId?: string, src?: string) {
   }
 }
 
+export function optimizeCloudinaryUrl(rawUrl: string): string {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return '';
+  if (
+    /^https?:\/\/res\.cloudinary\.com\//i.test(trimmed) &&
+    trimmed.includes('/image/upload/') &&
+    !/\/image\/upload\/[^/]*(?:f_|q_|w_|h_|c_)/.test(trimmed)
+  ) {
+    return trimmed.replace('/image/upload/', '/image/upload/f_auto,q_auto/');
+  }
+  return trimmed;
+}
+
 export function processImageSrc(anime: Partial<Anime>, studioName: string = 'Estudio'): string {
   try {
-    // 1. Base64 coverData from current anime object: 0ms INSTANT load and always reflects latest edits!
+    // 1. Explicit external HTTP/HTTPS cover URL (e.g. Cloudinary) always takes top priority for instant CDN loading
+    const externalUrl =
+      (anime.image && /^https?:\/\//i.test(anime.image.trim()) ? anime.image.trim() : '') ||
+      (anime.coverUrl && /^https?:\/\//i.test(anime.coverUrl.trim()) ? anime.coverUrl.trim() : '');
+    if (externalUrl) {
+      if (anime.id && globalCoverDataMap.has(anime.id)) {
+        globalCoverDataMap.delete(anime.id);
+      }
+      return optimizeCloudinaryUrl(externalUrl);
+    }
+
+    // 2. Base64 coverData from current anime object
     if (anime.coverData && anime.coverData.startsWith('data:image/')) {
       if (anime.id && globalCoverDataMap.get(anime.id) !== anime.coverData) {
         globalCoverDataMap.set(anime.id, anime.coverData);
@@ -88,14 +112,12 @@ export function processImageSrc(anime: Partial<Anime>, studioName: string = 'Est
       }
       return anime.image;
     }
-    // 2. Explicit external HTTP/HTTPS cover URL takes priority over old cached base64 if admin switched to URL
-    if (anime.image && (anime.image.startsWith('http://') || anime.image.startsWith('https://'))) {
-      return anime.image.trim();
-    }
+
     // 3. Memory Cache fallback when only lightweight anime reference is passed
     if (anime.id && globalCoverDataMap.has(anime.id)) {
       return globalCoverDataMap.get(anime.id)!;
     }
+
     // 4. Local server cover URL as secondary path (with cache-busting if updatedAt is present)
     if (anime.image && (anime.image.startsWith('/covers/') || anime.image.startsWith('/api/covers/'))) {
       const base = anime.image.trim();
@@ -297,7 +319,7 @@ export function SmartAnimeCover({
   // Dominant color placeholder gradient
   const placeholderGradient = getDominantPlaceholderGradient(anime.name, anime.id);
 
-  const propSourceKey = `${anime.id || ''}|${anime.image || ''}|${anime.coverData || ''}|${studioName || ''}`;
+  const propSourceKey = `${anime.id || ''}|${anime.image || ''}|${anime.coverUrl || ''}|${anime.coverData || ''}|${anime.updatedAt || ''}|${studioName || ''}`;
   const prevPropSourceKeyRef = useRef<string>(propSourceKey);
 
   useEffect(() => {
@@ -376,6 +398,7 @@ export function SmartAnimeCover({
         src={imageSrc}
         alt={alt || anime.name || 'Cover'}
         loading={priority ? 'eager' : loading}
+        fetchPriority={priority ? 'high' : 'auto'}
         decoding="async"
         referrerPolicy="no-referrer"
         onLoad={handleLoad}
@@ -383,7 +406,7 @@ export function SmartAnimeCover({
         className={`${className} ${
           isInstant 
             ? 'opacity-100' 
-            : `transition-opacity duration-300 ease-out ${isLoaded ? 'opacity-100' : 'opacity-0'}`
+            : `transition-opacity duration-200 ease-out ${isLoaded ? 'opacity-100' : 'opacity-0'}`
         }`}
       />
     </div>

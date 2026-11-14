@@ -26,17 +26,25 @@ export interface RealtimeCatalogCallbacks {
 
 export function mapFirestoreAnimeDoc(docSnap: any): Anime {
   const d = docSnap.data();
+  const resolvedImage = String(d.image || d.coverUrl || '');
+  const hasExternalUrl = /^https?:\/\//i.test(resolvedImage);
+  const resolvedStudioIds: string[] = Array.isArray(d.studioIds)
+    ? d.studioIds.map(String).filter(Boolean)
+    : (d.studioId ? [String(d.studioId)] : []);
+
   return {
     id: String(d.id || docSnap.id),
     name: d.name || '',
-    image: d.image || '',
-    coverData: d.coverData || (d.image && typeof d.image === 'string' && d.image.startsWith('data:') ? d.image : undefined),
+    image: resolvedImage,
+    coverData: hasExternalUrl
+      ? undefined
+      : (d.coverData || (resolvedImage.startsWith('data:') ? resolvedImage : undefined)),
     year: d.year ? normalizeAnimeYear(d.year) : '',
     releaseMonth: d.releaseMonth || d.release_month || '',
     telegramUrl: d.telegramUrl || '',
     episodes: normalizeEpisodesList(d.episodes),
-    studioId: d.studioId || '',
-    studioIds: d.studioIds || (d.studioId ? [d.studioId] : []),
+    studioId: d.studioId || resolvedStudioIds[0] || '',
+    studioIds: resolvedStudioIds,
     genreIds: d.genreIds || [],
     status: d.status || 'Finalizado',
     description: d.description || '',
