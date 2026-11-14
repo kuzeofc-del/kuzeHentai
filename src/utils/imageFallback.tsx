@@ -73,22 +73,9 @@ export function persistCoverLocally(animeId?: string, src?: string) {
   }
 }
 
-export function optimizeCloudinaryUrl(rawUrl: string): string {
-  const trimmed = (rawUrl || '').trim();
-  if (!trimmed) return '';
-  if (
-    /^https?:\/\/res\.cloudinary\.com\//i.test(trimmed) &&
-    trimmed.includes('/image/upload/') &&
-    !/\/image\/upload\/[^/]*(?:f_|q_|w_|h_|c_)/.test(trimmed)
-  ) {
-    return trimmed.replace('/image/upload/', '/image/upload/f_auto,q_auto/');
-  }
-  return trimmed;
-}
-
 export function processImageSrc(anime: Partial<Anime>, studioName: string = 'Estudio'): string {
   try {
-    // 1. Explicit external HTTP/HTTPS cover URL (e.g. Cloudinary) always takes top priority for instant CDN loading
+    // 1. Explicit external HTTP/HTTPS cover URL (e.g. Cloudinary) always takes top priority and preserves 100% original quality/size
     const externalUrl =
       (anime.image && /^https?:\/\//i.test(anime.image.trim()) ? anime.image.trim() : '') ||
       (anime.coverUrl && /^https?:\/\//i.test(anime.coverUrl.trim()) ? anime.coverUrl.trim() : '');
@@ -96,7 +83,7 @@ export function processImageSrc(anime: Partial<Anime>, studioName: string = 'Est
       if (anime.id && globalCoverDataMap.has(anime.id)) {
         globalCoverDataMap.delete(anime.id);
       }
-      return optimizeCloudinaryUrl(externalUrl);
+      return externalUrl;
     }
 
     // 2. Base64 coverData from current anime object
