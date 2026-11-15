@@ -123,23 +123,6 @@
   <body style="margin: 0; padding: 0; border: 0; outline: none;">
     <div id="root" style="margin: 0; padding: 0; border: 0; outline: none;"></div>
     <script type="module" src="/src/main.tsx"></script>
-    <script>
-      // Zero-cache policy: unregister legacy service workers and clear browser Cache Storage
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.getRegistrations().then(function(regs) {
-          for (var reg of regs) {
-            reg.unregister();
-          }
-        }).catch(function() {});
-      }
-      if ('caches' in window) {
-        caches.keys().then(function(names) {
-          for (var name of names) {
-            caches.delete(name);
-          }
-        }).catch(function() {});
-      }
-    </script>
   </body>
 </html>
 

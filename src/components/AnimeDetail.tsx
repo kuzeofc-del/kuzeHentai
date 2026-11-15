@@ -8,7 +8,7 @@ import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { Anime, Studio, Genre, normalizeAnimeYear, resolveContinuationGroup, formatContinuationTitle } from '../types';
 import { ArrowLeft, Download, Plus, Check, Play, Pause, Volume2, VolumeX, X, Film, ExternalLink, Tv, Video, Maximize2, Minimize2, RotateCcw, RotateCw, FastForward, Maximize, Loader2, Sparkles, Eye, EyeOff, Star, Info } from 'lucide-react';
-import { getFallbackSvg, processImageSrc, globalImageCache, globalLoadedAnimeIds, SmartAnimeCover, preloadAnimeCover, prefetchAnime } from '../utils/imageFallback';
+import { getFallbackSvg, processImageSrc, portadaUrl, globalImageCache, globalLoadedAnimeIds, SmartAnimeCover, preloadAnimeCover, prefetchAnime } from '../utils/imageFallback';
 import GlobalComments from './GlobalComments';
 import AnimeRatingModal from './AnimeRatingModal';
 import { getAnimeRatingStats, submitAnimeVote, RatingStats } from '../utils/ratingManager';
@@ -706,11 +706,14 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
         <div className="absolute inset-0 w-full h-full pointer-events-none z-0 overflow-hidden select-none">
           {imageSrc && (
             <img
-              src={imageSrc}
+              src={portadaUrl(imageSrc, 'episodio')}
               alt={anime.name}
               loading="eager"
               decoding="async"
+              width={400}
+              height={600}
               referrerPolicy="no-referrer"
+              onLoad={() => setIsLoaded(true)}
               className={`w-full h-full object-cover object-center transition-opacity duration-700 ${
                 isLoaded ? 'opacity-100' : 'opacity-0'
               }`}
@@ -743,6 +746,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
               anime={anime}
               studioName={studio?.name || 'Estudio'}
               alt={anime.name}
+              tamaño="original"
               priority={true}
               loading="eager"
               className="w-full h-full object-cover object-[center_top] sm:object-[center_12%]"
@@ -1141,7 +1145,9 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
               {displayEpisodes.length > 0 ? (
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-1 sm:gap-1.5 max-w-2xl">
                   {displayEpisodes.map((ep) => {
-                    const epCover = ep.thumbnail || ep.coverImage || anime.coverData || anime.image;
+                    const ownThumb = ep.thumbnail || ep.coverImage;
+                    const fallbackCover = anime.coverData || anime.image;
+                    const epCover = ownThumb || (fallbackCover ? portadaUrl(fallbackCover, 'episodio') : '');
 
                     return (
                       <div
@@ -1160,8 +1166,10 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                           <img
                             src={epCover}
                             alt={`Episodio ${ep.number}`}
-                            loading="eager"
+                            loading="lazy"
                             decoding="async"
+                            width={400}
+                            height={225}
                             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                             onError={(e) => {
                               e.currentTarget.src = getFallbackSvg(anime.name);
@@ -1238,8 +1246,11 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                                   anime={relAnime}
                                   studioName={relStudio}
                                   alt={relAnime.name}
-                                  loading="eager"
-                                  priority={true}
+                                  tamaño="vineta"
+                                  loading="lazy"
+                                  priority={false}
+                                  width={300}
+                                  height={450}
                                   className="w-full h-full object-cover"
                                 />
                                 {/* Pequeña parte del nombre abajo en la portada */}
@@ -1300,8 +1311,11 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                                 anime={rec}
                                 studioName={recStudio}
                                 alt={rec.name}
-                                loading="eager"
-                                priority={true}
+                                tamaño="vineta"
+                                loading="lazy"
+                                priority={false}
+                                width={300}
+                                height={450}
                                 className="w-full h-full object-cover"
                               />
                               {/* Subtle title overlay at bottom */}
@@ -1518,7 +1532,9 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                           <div className="grid grid-cols-2 gap-1 sm:gap-1.5 max-h-56 overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-purple-900/60 scrollbar-track-transparent">
                             {displayEpisodes.map((ep) => {
                               const isActive = ep.number === (currentEpisode?.number || 1);
-                              const epCover = ep.thumbnail || ep.coverImage || anime.coverData || anime.image;
+                              const ownThumb = ep.thumbnail || ep.coverImage;
+                              const fallbackCover = anime.coverData || anime.image;
+                              const epCover = ownThumb || (fallbackCover ? portadaUrl(fallbackCover, 'episodio') : '');
 
                               return (
                                 <div
@@ -1530,6 +1546,10 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                                     <img
                                       src={epCover}
                                       alt={`Episodio ${ep.number}`}
+                                      loading="lazy"
+                                      decoding="async"
+                                      width={400}
+                                      height={225}
                                       className="w-full h-full object-cover"
                                       onError={(e) => {
                                         e.currentTarget.src = getFallbackSvg(anime.name);

@@ -168,8 +168,11 @@ export default function DailyGenreSection({
               anime={anime}
               studioName={studioName}
               alt={`${genre.name} - ${anime.name}`}
-              loading={isFirstFew ? "eager" : "lazy"}
+              tamaño="horizontal"
+              loading="lazy"
               priority={false}
+              width={600}
+              height={338}
               className="w-full h-full object-cover object-[center_25%]"
             />
 

@@ -6,7 +6,7 @@
 import React, { useState, useMemo, useRef, useDeferredValue, useEffect } from 'react';
 import { db, doc, setDoc } from '../lib/firebase';
 import { Anime, Episode, Studio } from '../types';
-import { SmartAnimeCover, getFallbackSvg } from '../utils/imageFallback';
+import { SmartAnimeCover, getFallbackSvg, portadaUrl } from '../utils/imageFallback';
 import {
   Search, Film, Trash2, Save, ArrowLeft, Upload, Link as LinkIcon,
   Check, AlertCircle, Image as ImageIcon, X, RefreshCw
@@ -141,12 +141,14 @@ export const AdminEpisodeManager: React.FC<AdminEpisodeManagerProps> = ({
           ? new Date(ep.addedToRecentAt).getTime()
           : (baseTime + epNum * 1000);
 
+        const ownThumb = ep.thumbnail || ep.coverImage;
+        const fallbackCover = anime.coverData || anime.image;
         items.push({
           id: `${anime.id}-ep-${epNum}`,
           anime,
           episode: ep,
           episodeNumber: epNum,
-          coverImage: ep.thumbnail || ep.coverImage || anime.coverData || anime.image,
+          coverImage: ownThumb || (fallbackCover ? portadaUrl(fallbackCover, 'episodio') : undefined),
           mp4Url: getEpisodeUrl(ep),
           timestamp: epTimestamp,
           studioName,
@@ -633,6 +635,10 @@ export const AdminEpisodeManager: React.FC<AdminEpisodeManagerProps> = ({
                             anime={anime}
                             studioName="Estudio"
                             alt={anime.name}
+                            tamaño="mini"
+                            loading="lazy"
+                            width={150}
+                            height={225}
                             className="w-full h-full object-cover"
                           />
                         </div>
@@ -698,8 +704,10 @@ export const AdminEpisodeManager: React.FC<AdminEpisodeManagerProps> = ({
                       <img
                         src={item.coverImage}
                         alt={`${item.anime.name} - Ep ${item.episodeNumber}`}
-                        loading="eager"
+                        loading="lazy"
                         decoding="async"
+                        width={400}
+                        height={225}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                         referrerPolicy="no-referrer"
                         onError={(e) => {
@@ -763,6 +771,10 @@ export const AdminEpisodeManager: React.FC<AdminEpisodeManagerProps> = ({
                   anime={selectedAnime}
                   studioName="Estudio"
                   alt={selectedAnime.name}
+                  tamaño="mini"
+                  loading="lazy"
+                  width={150}
+                  height={225}
                   className="w-full h-full object-cover"
                 />
               </div>

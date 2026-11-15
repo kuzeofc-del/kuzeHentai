@@ -252,6 +252,7 @@ export default function PopularHeroCarousel({
               anime={currentAnime}
               studioName={studioName}
               alt={currentAnime.name}
+              tamaño="original"
               priority={true}
               loading="eager"
               className="w-full h-full object-cover object-[center_top] sm:object-[center_12%]"

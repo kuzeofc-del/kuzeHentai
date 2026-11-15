@@ -10,8 +10,6 @@ import {
   saveMyListToIDB, 
   getMyListFromIDB, 
   saveMyListAnimesToIDB,
-  clearCatalogFromIDB,
-  purgeAllCoversFromIDB,
   recordAdminCatalogMutation,
   applyRecentAdminMutations
 } from './lib/idbStorage';
@@ -26,7 +24,8 @@ import {
   setFullCatalogInMemoryLoaded,
   isFullCatalogInMemory
 } from './lib/memoryCache';
-import { auth, onAuthStateChanged, configureAuthPersistence, db, doc, getDoc, collection, getDocs, getDocsFromServer, query, limit, isFirebaseConfigured } from './lib/firebase';
+import { auth, onAuthStateChanged, configureAuthPersistence, db, doc, getDoc, onSnapshot, isFirebaseConfigured } from './lib/firebase';
+import { subscribeToRealtimeCatalog, mapFirestoreAnimeDoc } from './lib/realtimeCatalog';
 import { User } from 'firebase/auth';
 import { 
   addAnimeToUserList, 
@@ -62,7 +61,7 @@ import DailyStudiosSection from './components/DailyStudiosSection';
 import { getRecommendedAnimes } from './utils/recommendationManager';
 
 const AdminPanel = React.lazy(() => import('./components/AdminPanel'));
-import { SmartAnimeCover, processImageSrc, globalImageCache, preloadAllAnimes, preloadAnimeCover, getFallbackSvg, startPrioritizedAppLoading, prefetchAnime, prefetchCatalogPage } from './utils/imageFallback';
+import { SmartAnimeCover, portadaUrl, processImageSrc, globalImageCache, preloadAllAnimes, preloadAnimeCover, getFallbackSvg, startPrioritizedAppLoading, prefetchAnime, prefetchCatalogPage } from './utils/imageFallback';
 import { normalizeEpisodesList } from './utils/episodeUtils';
 import { enforceEpisodesRotation } from './utils/episodeRotation';
 import { getAnimeRatingStats } from './utils/ratingManager';
@@ -637,7 +636,6 @@ export default function App() {
   selectedGenreRef.current = selectedGenre;
   const animesRef = useRef<Anime[]>(animes);
   animesRef.current = animes;
-  const lastCatalogVersionRef = useRef<number>(0);
   const hasInAppHistoryRef = useRef<boolean>(false);
   const [selectedStudioId, setSelectedStudioId] = useState('');
   const [selectedGenreIds, setSelectedGenreIds] = useState<string[]>([]);
@@ -787,9 +785,8 @@ export default function App() {
     } catch {}
   }, [searchQuery, selectedStudioId, selectedGenreIds, selectedYear, selectedStatus, selectedRating, sortBy]);
 
-  // Fetch Database Data from APIs safely without wiping state on error
-  const fetchData = async (silent = false, updatedAnime?: Anime | Anime[], deletedId?: string) => {
-    // Write-through to RAM memory cache immediately
+  // Optimistic local state update helper when AdminPanel mutates an anime (onSnapshot syncs server automatically)
+  const applyOptimisticCatalogUpdate = useCallback((updatedAnime?: Anime | Anime[], deletedId?: string) => {
     if (deletedId) {
       removeAnimeFromMemory(deletedId);
       setAnimes(prev => prev.filter(a => a.id !== deletedId));
@@ -831,364 +828,71 @@ export default function App() {
         return Array.from(map.values());
       });
     }
+  }, []);
 
-    try {
-      if (!silent && animesRef.current.length === 0) {
-        setLoading(true);
-      }
-      const headers: Record<string, string> = {};
-      const token = localStorage.getItem('hk_admin_token');
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-      }
-      if (currentUser?.email) {
-        headers['x-admin-email'] = currentUser.email;
-      }
-
-      // Cache-busting headers to prevent Vercel CDN/Browser edge caches from serving stale data
-      const fetchHeaders: HeadersInit = {
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        ...headers
-      };
-
-      // Skip /api/bootstrap only on confirmed static third-party hosts
-      const isKnownStaticHost =
-        typeof window !== 'undefined' &&
-        (window.location.hostname.includes('vercel.app') ||
-          window.location.hostname.includes('netlify.app') ||
-          window.location.hostname.includes('github.io'));
-
-      let isStaticHosting = isKnownStaticHost;
-      let bootstrapRes: Response | null = null;
-
-      if (!isKnownStaticHost) {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8500);
-        bootstrapRes = await fetch(`/api/bootstrap?_t=${Date.now()}`, {
-          headers: fetchHeaders,
-          cache: 'no-store',
-          signal: controller.signal
-        })
-          .catch(() => null)
-          .finally(() => clearTimeout(timeoutId));
-      }
-
-      if (bootstrapRes && bootstrapRes.ok) {
-        const contentType = bootstrapRes.headers.get('content-type') || '';
-        if (contentType.includes('application/json')) {
-          const data = await bootstrapRes.json().catch(() => null);
-          if ( data && Array.isArray(data.studios) && Array.isArray(data.genres) && Array.isArray(data.animes)) {
-            if (data.version && typeof data.version === 'number') {
-              lastCatalogVersionRef.current = data.version;
-            }
-            const normalizedAnimes = applyRecentAdminMutations(
-              data.animes.map((a: any) => ({
-                ...a,
-                episodes: normalizeEpisodesList(a.episodes)
-              }))
-            );
-            const isUnchanged =
-              silent &&
-              !updatedAnime &&
-              !deletedId &&
-              animesRef.current.length > 0 &&
-              computeCatalogSignature(animesRef.current) === computeCatalogSignature(normalizedAnimes);
-
-            if (!isUnchanged) {
-              setStudios(data.studios);
-              setGenres(data.genres);
-              setAnimes(normalizedAnimes);
-              startPrioritizedAppLoading(normalizedAnimes, data.studios);
-            }
-            return;
-          }
-        }
-      }
-
-      let loadedStudios: Studio[] | null = null;
-      let loadedGenres: Genre[] | null = null;
-      let loadedAnimes: Anime[] | null = null;
-
-      // Only attempt individual API requests if NOT on static hosting (e.g. Vercel)
-      if (!isStaticHosting) {
-        const [resStudios, resGenres, resAnimes] = await Promise.all([
-          fetch(`/api/studios?_t=${Date.now()}`, { headers: fetchHeaders, cache: 'no-store' }).catch(() => null),
-          fetch(`/api/genres?_t=${Date.now()}`, { headers: fetchHeaders, cache: 'no-store' }).catch(() => null),
-          fetch(`/api/animes?_t=${Date.now()}`, { headers: fetchHeaders, cache: 'no-store' }).catch(() => null)
-        ]);
-
-        if (resStudios && resStudios.ok) {
-          const contentType = resStudios.headers.get('content-type') || '';
-          if (contentType.includes('application/json')) {
-            try {
-              const dataStudios = await resStudios.json();
-              if (Array.isArray(dataStudios)) loadedStudios = dataStudios;
-            } catch (e) {}
-          }
-        }
-
-        if (resGenres && resGenres.ok) {
-          const contentType = resGenres.headers.get('content-type') || '';
-          if (contentType.includes('application/json')) {
-            try {
-              const dataGenres = await resGenres.json();
-              if (Array.isArray(dataGenres)) loadedGenres = dataGenres;
-            } catch (e) {}
-          }
-        }
-
-        if (resAnimes && resAnimes.ok) {
-          const contentType = resAnimes.headers.get('content-type') || '';
-          if (contentType.includes('application/json')) {
-            try {
-              const dataAnimes = await resAnimes.json();
-              if (Array.isArray(dataAnimes)) {
-                loadedAnimes = dataAnimes.map((a: any) => ({
-                  ...a,
-                  episodes: normalizeEpisodesList(a.episodes)
-                }));
-              }
-            } catch (e) {}
-          }
-        }
-      }
-
-      // CRITICAL FALLBACK FOR VERCEL / NETLIFY / GITHUB PAGES / STATIC HOSTING:
-      if ((!loadedAnimes || loadedAnimes.length === 0) && db && isFirebaseConfigured) {
-        const mapFirestoreAnimeDoc = (docSnap: any): Anime => {
-          const d = docSnap.data();
-          const resolvedImage = String(d.image || d.coverUrl || '');
-          const hasExternalUrl = /^https?:\/\//i.test(resolvedImage);
-          const resolvedStudioIds: string[] = Array.isArray(d.studioIds)
-            ? d.studioIds.map(String).filter(Boolean)
-            : (d.studioId ? [String(d.studioId)] : []);
-          return {
-            id: String(d.id || docSnap.id),
-            name: d.name || '',
-            image: resolvedImage,
-            coverData: hasExternalUrl
-              ? undefined
-              : (d.coverData || (resolvedImage.startsWith('data:') ? resolvedImage : undefined)),
-            year: d.year ? normalizeAnimeYear(d.year) : '',
-            releaseMonth: d.releaseMonth || d.release_month || '',
-            telegramUrl: d.telegramUrl || '',
-            episodes: normalizeEpisodesList(d.episodes),
-            studioId: d.studioId || resolvedStudioIds[0] || '',
-            studioIds: resolvedStudioIds,
-            genreIds: d.genreIds || [],
-            status: d.status || 'Finalizado',
-            description: d.description || '',
-            continuationType: d.continuationType || d.continuation_type || undefined,
-            continuationAnimeIds: Array.isArray(d.continuationAnimeIds)
-              ? d.continuationAnimeIds.map(String)
-              : Array.isArray(d.continuation_anime_ids)
-              ? d.continuation_anime_ids.map(String)
-              : undefined,
-            hidden: Boolean(d.hidden),
-            downloads: Number(d.downloads) || 0,
-            orderIndex: typeof d.orderIndex === 'number' ? d.orderIndex : undefined,
-            createdAt: d.createdAt || '',
-            updatedAt: d.updatedAt || '',
-            storageLocation: 'Firebase Firestore',
-            savedInFirestore: true
-          } as Anime;
-        };
-
-        try {
-          // Single parallel fetch of the complete catalog bypassing stale local cache
-          const queryFullFirestoreCatalog = async () => {
-            const [animesSnap, studiosSnap, genresSnap] = await Promise.all([
-              getDocsFromServer(collection(db, 'animes')).catch(() => getDocs(collection(db, 'animes'))).catch(() => null),
-              loadedStudios ? Promise.resolve(null) : getDocsFromServer(collection(db, 'studios')).catch(() => getDocs(collection(db, 'studios'))).catch(() => null),
-              loadedGenres ? Promise.resolve(null) : getDocsFromServer(collection(db, 'genres')).catch(() => getDocs(collection(db, 'genres'))).catch(() => null)
-            ]);
-            return { animesSnap, studiosSnap, genresSnap };
-          };
-
-          let { animesSnap, studiosSnap, genresSnap } = await queryFullFirestoreCatalog();
-
-          if (!animesSnap || animesSnap.empty) {
-            await new Promise(r => setTimeout(r, 900));
-            const retryResult = await queryFullFirestoreCatalog();
-            if (retryResult.animesSnap && !retryResult.animesSnap.empty) {
-              animesSnap = retryResult.animesSnap;
-            }
-            if (!studiosSnap && retryResult.studiosSnap) {
-              studiosSnap = retryResult.studiosSnap;
-            }
-            if (!genresSnap && retryResult.genresSnap) {
-              genresSnap = retryResult.genresSnap;
-            }
-          }
-
-          if (animesSnap && !animesSnap.empty) {
-            const mapped = animesSnap.docs.map(mapFirestoreAnimeDoc);
-            mapped.sort((a: any, b: any) => {
-              const hasIdxA = typeof a.orderIndex === 'number';
-              const hasIdxB = typeof b.orderIndex === 'number';
-              if (hasIdxA && hasIdxB && a.orderIndex !== b.orderIndex) {
-                return a.orderIndex - b.orderIndex;
-              }
-              const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-              const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-              if (timeA !== timeB) return timeA - timeB;
-              return 0;
-            });
-            loadedAnimes = mapped;
-          }
-
-          if (studiosSnap) {
-            loadedStudios = studiosSnap.docs.map(docSnap => {
-              const d = docSnap.data();
-              return {
-                id: String(d.id || docSnap.id),
-                name: d.name || '',
-                image: d.image || '',
-                order: typeof d.order === 'number' ? d.order : 10,
-                orderIndex: typeof d.orderIndex === 'number' ? d.orderIndex : undefined,
-                storageLocation: 'Firebase Firestore'
-              } as Studio;
-            }).filter(s => Boolean(s.name)).sort((a: any, b: any) => {
-              if (typeof a.orderIndex === 'number' && typeof b.orderIndex === 'number') {
-                return a.orderIndex - b.orderIndex;
-              }
-              return 0;
-            });
-          }
-
-          if (genresSnap) {
-            loadedGenres = genresSnap.docs.map(docSnap => {
-              const d = docSnap.data();
-              return {
-                id: String(d.id || docSnap.id),
-                name: d.name || '',
-                image: d.image || '',
-                order: typeof d.order === 'number' ? d.order : 10,
-                orderIndex: typeof d.orderIndex === 'number' ? d.orderIndex : undefined,
-                storageLocation: 'Firebase Firestore'
-              } as Genre;
-            }).filter(g => Boolean(g.name)).sort((a: any, b: any) => {
-              if (typeof a.orderIndex === 'number' && typeof b.orderIndex === 'number') {
-                return a.orderIndex - b.orderIndex;
-              }
-              return 0;
-            });
-          }
-        } catch (fsErr) {
-          console.warn('⚠️ [Firebase Direct Fallback Warning]:', fsErr);
-        }
-      }
-
-      if (loadedStudios !== null) {
-        cacheStudiosInMemory(loadedStudios);
-        const prevSig = studiosRef.current.map(s => `${s.id}:${s.name}:${(s.image || '').length}`).join('|');
-        const nextSig = loadedStudios.map(s => `${s.id}:${s.name}:${(s.image || '').length}`).join('|');
-        if (prevSig !== nextSig || studiosRef.current.length === 0) {
-          setStudios(loadedStudios);
-        }
-      }
-
-      if (loadedGenres !== null) {
-        cacheGenresInMemory(loadedGenres);
-        const prevSig = genresRef.current.map(g => `${g.id}:${g.name}:${(g.image || '').length}`).join('|');
-        const nextSig = loadedGenres.map(g => `${g.id}:${g.name}:${(g.image || '').length}`).join('|');
-        if (prevSig !== nextSig || genresRef.current.length === 0) {
-          setGenres(loadedGenres);
-        }
-      }
-
-      if (loadedAnimes && loadedAnimes.length > 0) {
-        let finalAnimes = applyRecentAdminMutations(loadedAnimes);
-        if (deletedId) {
-          finalAnimes = finalAnimes.filter(a => a.id !== deletedId);
-        }
-        if (updatedAnime) {
-          const updatedList = Array.isArray(updatedAnime) ? updatedAnime : [updatedAnime];
-          const map = new Map<string, Anime>(finalAnimes.map(a => [a.id, a]));
-          updatedList.forEach(item => {
-            if (item && item.id) {
-              map.set(item.id, {
-                ...item,
-                episodes: normalizeEpisodesList(item.episodes)
-              });
-            }
-          });
-          finalAnimes = Array.from(map.values());
-        }
-
-        cacheAnimesInMemory(finalAnimes);
-
-        const isUnchanged =
-          silent &&
-          !updatedAnime &&
-          !deletedId &&
-          animesRef.current.length > 0 &&
-          computeCatalogSignature(animesRef.current) === computeCatalogSignature(finalAnimes);
-
-        if (!isUnchanged) {
-          setAnimes(finalAnimes);
-          startPrioritizedAppLoading(finalAnimes, loadedStudios || studiosRef.current);
-        }
-      }
-    } catch (err) {
-      console.warn('Sync status:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Always load fresh state on startup directly from Firebase / Server without local cache
+  // Real-time Firestore catalog subscription (shows locally cached data first, even offline, then syncs server updates)
   useEffect(() => {
     let isCancelled = false;
+    let hasPreloadedHero = false;
 
-    clearCatalogFromIDB().catch(() => {});
-    purgeAllCoversFromIDB().catch(() => {});
-    try {
-      localStorage.removeItem('kh_recent_admin_mutations_v1');
-      localStorage.removeItem('kh_persisted_loaded_covers');
-    } catch {}
+    const unsubCatalog = subscribeToRealtimeCatalog({
+      onAnimesUpdate: (nextAnimes) => {
+        if (isCancelled) return;
+        const normalizedAnimes = applyRecentAdminMutations(nextAnimes);
+        const isUnchanged =
+          animesRef.current.length > 0 &&
+          computeCatalogSignature(animesRef.current) === computeCatalogSignature(normalizedAnimes);
 
-    if (!isCancelled) {
-      fetchData(false);
-    }
+        if (!isUnchanged) {
+          cacheAnimesInMemory(normalizedAnimes);
+          setAnimes(normalizedAnimes);
+          if (!hasPreloadedHero && normalizedAnimes.length > 0) {
+            hasPreloadedHero = true;
+            startPrioritizedAppLoading(normalizedAnimes, studiosRef.current);
+          }
+        }
+        setLoading(false);
+      },
+      onStudiosUpdate: (nextStudios) => {
+        if (isCancelled) return;
+        cacheStudiosInMemory(nextStudios);
+        const prevSig = studiosRef.current.map(s => `${s.id}:${s.name}:${(s.image || '').length}`).join('|');
+        const nextSig = nextStudios.map(s => `${s.id}:${s.name}:${(s.image || '').length}`).join('|');
+        if (prevSig !== nextSig || studiosRef.current.length === 0) {
+          setStudios(nextStudios);
+        }
+      },
+      onGenresUpdate: (nextGenres) => {
+        if (isCancelled) return;
+        cacheGenresInMemory(nextGenres);
+        const prevSig = genresRef.current.map(g => `${g.id}:${g.name}:${(g.image || '').length}`).join('|');
+        const nextSig = nextGenres.map(g => `${g.id}:${g.name}:${(g.image || '').length}`).join('|');
+        if (prevSig !== nextSig || genresRef.current.length === 0) {
+          setGenres(nextGenres);
+        }
+      },
+      onInitialReady: () => {
+        if (!isCancelled) {
+          setLoading(false);
+        }
+      }
+    });
 
-    // Refresh only when explicit mutations occur (like admin edits or manual trigger)
-    const handleManualRefresh = () => {
-      fetchData(true);
-    };
-    window.addEventListener('kh_refresh_catalog', handleManualRefresh);
+    // Safety timeout so an offline device with an empty first-run cache never remains stuck on loading
+    const offlineSafetyTimer = setTimeout(() => {
+      if (!isCancelled) {
+        setLoading(false);
+      }
+    }, 2500);
 
-    // Recover smoothly when returning to the browser tab or reopening mobile browser app
+    // Recover scroll/animation cleanly when returning to the browser tab
     const handleAppResume = () => {
       if (document.visibilityState === 'hidden') return;
       document.body.style.overflow = '';
       setIsDetailAnimating(false);
-      // Silently re-check catalog updates whenever returning to the tab or reconnecting to network
-      fetchData(true);
     };
     window.addEventListener('pageshow', handleAppResume);
-    window.addEventListener('online', handleAppResume);
     document.addEventListener('visibilitychange', handleAppResume);
-
-    // Background sync: periodically check catalog version every 25s so any phone auto-receives new content
-    const versionSyncInterval = setInterval(async () => {
-      if (document.visibilityState === 'hidden') return;
-      try {
-        const res = await fetch(`/api/catalog-version?_t=${Date.now()}`, { cache: 'no-store' });
-        if (res.ok) {
-          const vData = await res.json().catch(() => null);
-          if (vData && typeof vData.version === 'number') {
-            if (lastCatalogVersionRef.current && vData.version > lastCatalogVersionRef.current) {
-              lastCatalogVersionRef.current = vData.version;
-              fetchData(true);
-            } else if (!lastCatalogVersionRef.current) {
-              lastCatalogVersionRef.current = vData.version;
-            }
-          }
-        }
-      } catch {}
-    }, 25000);
 
     const resolveStudioFromPath = (path: string, state?: any): Studio | null => {
       let id = '';
@@ -1256,51 +960,6 @@ export default function App() {
         if (id) {
           setSelectedAnimeId(id);
           setCurrentPage('detail');
-          // Fast single-document lookup from Firestore so reopening on /anime/<id> resolves immediately
-          if (animesRef.current.length === 0 && db && isFirebaseConfigured) {
-            getDoc(doc(db, 'animes', id))
-              .then((snap) => {
-                if (snap && snap.exists()) {
-                  const d = snap.data();
-                  const resolvedImage = String(d.image || d.coverUrl || '');
-                  const hasExternalUrl = /^https?:\/\//i.test(resolvedImage);
-                  const resolvedStudioIds: string[] = Array.isArray(d.studioIds)
-                    ? d.studioIds.map(String).filter(Boolean)
-                    : (d.studioId ? [String(d.studioId)] : []);
-                  const singleAnime: Anime = {
-                    id: String(d.id || snap.id),
-                    name: d.name || '',
-                    image: resolvedImage,
-                    coverData: hasExternalUrl
-                      ? undefined
-                      : (d.coverData || (resolvedImage.startsWith('data:') ? resolvedImage : undefined)),
-                    year: d.year ? normalizeAnimeYear(d.year) : '',
-                    releaseMonth: d.releaseMonth || d.release_month || '',
-                    telegramUrl: d.telegramUrl || '',
-                    episodes: normalizeEpisodesList(d.episodes),
-                    studioId: d.studioId || resolvedStudioIds[0] || '',
-                    studioIds: resolvedStudioIds,
-                    genreIds: d.genreIds || [],
-                    status: d.status || 'Finalizado',
-                    description: d.description || '',
-                    continuationType: d.continuationType || d.continuation_type || undefined,
-                    continuationAnimeIds: Array.isArray(d.continuationAnimeIds)
-                      ? d.continuationAnimeIds.map(String)
-                      : Array.isArray(d.continuation_anime_ids)
-                      ? d.continuation_anime_ids.map(String)
-                      : undefined,
-                    hidden: Boolean(d.hidden),
-                    downloads: Number(d.downloads) || 0,
-                    createdAt: d.createdAt || '',
-                    updatedAt: d.updatedAt || '',
-                    storageLocation: 'Firebase Firestore',
-                    savedInFirestore: true
-                  };
-                  setDirectLoadedAnime(singleAnime);
-                }
-              })
-              .catch(() => {});
-          }
         } else {
           setCurrentPage('home');
         }
@@ -1429,14 +1088,42 @@ export default function App() {
     window.addEventListener('popstate', handlePopState);
     return () => {
       isCancelled = true;
-      clearInterval(versionSyncInterval);
-      window.removeEventListener('kh_refresh_catalog', handleManualRefresh);
+      unsubCatalog();
+      clearTimeout(offlineSafetyTimer);
       window.removeEventListener('popstate', handlePopState);
       window.removeEventListener('pageshow', handleAppResume);
-      window.removeEventListener('online', handleAppResume);
       document.removeEventListener('visibilitychange', handleAppResume);
     };
   }, []);
+
+  // Real-time per-anime document subscription (cache-first + server sync for /anime/<id>)
+  useEffect(() => {
+    if (currentPage !== 'detail' || !selectedAnimeId || !db || !isFirebaseConfigured) {
+      if (currentPage !== 'detail') {
+        setDirectLoadedAnime(null);
+      }
+      return;
+    }
+
+    const animeDocRef = doc(db, 'animes', selectedAnimeId);
+    const unsubscribeAnimeDoc = onSnapshot(
+      animeDocRef,
+      { includeMetadataChanges: false },
+      (snap) => {
+        const fromCache = snap.metadata.fromCache;
+        if (snap.exists()) {
+          setDirectLoadedAnime(mapFirestoreAnimeDoc(snap));
+        } else if (!fromCache) {
+          setDirectLoadedAnime(null);
+        }
+      },
+      (err) => {
+        console.warn('[AnimeDetail Realtime Sync]:', err?.message || err);
+      }
+    );
+
+    return () => unsubscribeAnimeDoc();
+  }, [currentPage, selectedAnimeId]);
 
 
 
@@ -2027,12 +1714,14 @@ export default function App() {
         const epTimestamp = ep.addedToRecentAt
           ? new Date(ep.addedToRecentAt).getTime()
           : (baseTime + epNum * 1000);
+        const ownThumb = ep.thumbnail || ep.coverImage;
+        const fallbackCover = anime.coverData || anime.image;
         items.push({
           id: `${anime.id}-ep-${epNum}`,
           anime,
           episodeNumber: epNum,
           episodeTitle: ep.title || ep.name,
-          coverImage: ep.thumbnail || ep.coverImage || anime.coverData || anime.image,
+          coverImage: ownThumb || (fallbackCover ? portadaUrl(fallbackCover, 'episodio') : undefined),
           timestamp: epTimestamp,
         });
       });
@@ -2067,7 +1756,7 @@ export default function App() {
       enforceEpisodesRotation(animes, 30)
         .then((res) => {
           if (res.updatedAnimes && res.updatedAnimes.length > 0) {
-            fetchData(true, res.updatedAnimes);
+            applyOptimisticCatalogUpdate(res.updatedAnimes);
           }
         })
         .catch(() => {})
@@ -2491,15 +2180,15 @@ export default function App() {
     }
   }, [currentPage]);
 
-  // Selected anime lookup memoized for maximum fluidity
+  // Selected anime lookup memoized for maximum fluidity (prefers live per-ID onSnapshot doc)
   const currentAnime = useMemo(() => {
     if (!selectedAnimeId) return undefined;
     const normId = String(selectedAnimeId).trim();
-    const found = animes.find(a => String(a.id).trim() === normId);
-    if (found) return found;
     if (directLoadedAnime && String(directLoadedAnime.id).trim() === normId) {
       return directLoadedAnime;
     }
+    const found = animes.find(a => String(a.id).trim() === normId);
+    if (found) return found;
     return undefined;
   }, [animes, selectedAnimeId, directLoadedAnime]);
 
@@ -3042,7 +2731,9 @@ export default function App() {
                         <img
                           src={item.coverImage}
                           alt={`${item.anime.name} - Ep ${item.episodeNumber}`}
-                          loading={epIdx < 3 ? "eager" : "lazy"}
+                          loading="lazy"
+                          width={400}
+                          height={225}
                           decoding="async"
                           className="w-full h-full object-cover"
                           referrerPolicy="no-referrer"
@@ -3094,8 +2785,11 @@ export default function App() {
                       anime={anime}
                       studioName={studioName}
                       alt={anime.name}
-                      loading={nhIdx < 3 ? "eager" : "lazy"}
+                      tamaño="horizontal"
+                      loading="lazy"
                       priority={false}
+                      width={600}
+                      height={338}
                       className="w-full h-full object-cover object-[center_25%]"
                     />
                     {/* Solo difuminado suave abajo en el título */}
@@ -3188,8 +2882,11 @@ export default function App() {
                         anime={anime}
                         studioName={studioName}
                         alt={anime.name}
-                        loading={isUpFirst ? "eager" : "lazy"}
+                        tamaño="horizontal"
+                        loading="lazy"
                         priority={false}
+                        width={600}
+                        height={338}
                         className="w-full h-full object-cover object-[center_25%]"
                       />
                       {/* Difuminado suave abajo en el título */}
@@ -3434,7 +3131,7 @@ export default function App() {
                   studios={sortedStudiosByPopularity}
                   genres={sortedGenresByPopularity}
                   animes={animes}
-                  onRefresh={(updatedAnime, deletedId) => fetchData(true, updatedAnime, deletedId)}
+                  onRefresh={(updatedAnime, deletedId) => applyOptimisticCatalogUpdate(updatedAnime, deletedId)}
                   onBackToHome={() => navigateTo('home', undefined, undefined, null, undefined, -1)}
                   currentUser={currentUser}
                 />

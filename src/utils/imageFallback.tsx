@@ -1,6 +1,70 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Anime } from '../types';
-import { saveCoverToIDB, getAllCoversFromIDB } from '../lib/idbStorage';
+
+export type PortadaSize = 'original' | 'horizontal' | 'episodio' | 'vineta' | 'mini';
+
+const CLOUDINARY_TRANSFORM_WIDTH: Record<Exclude<PortadaSize, 'original'>, number> = {
+  horizontal: 600,
+  episodio: 400,
+  vineta: 300,
+  mini: 150,
+};
+
+const PORTADA_DIMENSIONS: Record<PortadaSize, { width: number; height: number }> = {
+  original: { width: 800, height: 1200 },
+  horizontal: { width: 600, height: 338 },
+  episodio: { width: 400, height: 225 },
+  vineta: { width: 300, height: 450 },
+  mini: { width: 150, height: 225 },
+};
+
+/**
+ * Inserts lightweight Cloudinary width + q_auto,f_auto transformations right after /upload/
+ * without cropping. Only transforms res.cloudinary.com URLs containing /upload/ that don't
+ * already have transformations. For 'original', returns the URL completely unchanged.
+ */
+export function portadaUrl(url: string | undefined | null, tamaño: PortadaSize = 'original'): string {
+  if (!url || typeof url !== 'string') return url || '';
+  if (tamaño === 'original') return url;
+
+  const trimmed = url.trim();
+  if (!trimmed) return '';
+
+  // Only transform res.cloudinary.com URLs containing /upload/
+  if (!/^https?:\/\/res\.cloudinary\.com\//i.test(trimmed)) {
+    return url;
+  }
+  const uploadMarker = '/upload/';
+  const uploadIdx = trimmed.indexOf(uploadMarker);
+  if (uploadIdx === -1) {
+    return url;
+  }
+
+  const afterUpload = trimmed.slice(uploadIdx + uploadMarker.length);
+  if (!afterUpload) return url;
+
+  const firstSlash = afterUpload.indexOf('/');
+  const firstSegment = firstSlash === -1 ? afterUpload : afterUpload.slice(0, firstSlash);
+
+  // If the first segment right after /upload/ is not a version (v123456) and looks like
+  // existing Cloudinary transformations (no image extension + contains transform tokens), leave untouched
+  const isVersionSegment = /^v\d+$/i.test(firstSegment);
+  const hasImageExtension = /\.(?:webp|jpe?g|png|gif|avif|svg|bmp|tiff?)(?:[?#].*)?$/i.test(firstSegment);
+  const looksLikeCloudinaryTransform =
+    !isVersionSegment &&
+    !hasImageExtension &&
+    /(?:^|,)(?:w|h|c|q|f|g|e|t|l|u|o|r|b|x|y|z|a|d|ar|bo|co|cs|dl|dn|du|eo|fl|fn|if|ki|pg|so|sp|vs|dpr)_/i.test(firstSegment);
+
+  if (looksLikeCloudinaryTransform) {
+    return url;
+  }
+
+  const targetWidth = CLOUDINARY_TRANSFORM_WIDTH[tamaño];
+  if (!targetWidth) return url;
+
+  const transformation = `w_${targetWidth},q_auto,f_auto/`;
+  return trimmed.slice(0, uploadIdx + uploadMarker.length) + transformation + afterUpload;
+}
 
 // In-memory lookup map for active session
 export const globalCoverDataMap = new Map<string, string>();
@@ -73,9 +137,13 @@ export function persistCoverLocally(animeId?: string, src?: string) {
   }
 }
 
-export function processImageSrc(anime: Partial<Anime>, studioName: string = 'Estudio'): string {
+export function processImageSrc(
+  anime: Partial<Anime>,
+  studioName: string = 'Estudio',
+  tamaño: PortadaSize = 'original'
+): string {
   try {
-    // 1. Explicit external HTTP/HTTPS cover URL (e.g. Cloudinary) always takes top priority and preserves 100% original quality/size
+    // 1. Explicit external HTTP/HTTPS cover URL (e.g. Cloudinary) always takes top priority
     const externalUrl =
       (anime.image && /^https?:\/\//i.test(anime.image.trim()) ? anime.image.trim() : '') ||
       (anime.coverUrl && /^https?:\/\//i.test(anime.coverUrl.trim()) ? anime.coverUrl.trim() : '');
@@ -83,7 +151,7 @@ export function processImageSrc(anime: Partial<Anime>, studioName: string = 'Est
       if (anime.id && globalCoverDataMap.has(anime.id)) {
         globalCoverDataMap.delete(anime.id);
       }
-      return externalUrl;
+      return portadaUrl(externalUrl, tamaño);
     }
 
     // 2. Base64 coverData from current anime object
@@ -161,7 +229,8 @@ export async function cacheInCacheStorage(src: string) {
 export function preloadAnimeCover(
   anime: Partial<Anime>, 
   studiosOrStudioName: { id: string; name: string }[] | string = 'Estudio',
-  highPriority: boolean = false
+  highPriority: boolean = false,
+  tamaño: PortadaSize = 'original'
 ): Promise<string> {
   let studioName = 'Estudio';
   if (typeof studiosOrStudioName === 'string') {
@@ -173,7 +242,7 @@ export function preloadAnimeCover(
     studioName = studiosOrStudioName.find(s => sIds.includes(s.id))?.name || 'Estudio';
   }
 
-  const src = processImageSrc(anime, studioName);
+  const src = processImageSrc(anime, studioName, tamaño);
   if (!src) return Promise.resolve('');
 
   if (globalImageCache.has(src) || src.startsWith('data:') || (anime.id && globalLoadedAnimeIds.has(anime.id))) {
@@ -219,8 +288,8 @@ export function preloadAnimeCover(
 
 /**
  * Intelligent Hover & Proximity Prefetching:
- * Called on mouseEnter, pointerEnter, or touchStart to preload full images,
- * episodes thumbnails, and metadata in 0ms before the user even clicks!
+ * Called on mouseEnter, pointerEnter, or touchStart to preload full images
+ * in 0ms before the user even clicks!
  */
 const prefetchedAnimeIds = new Set<string>();
 export function prefetchAnime(
@@ -231,7 +300,7 @@ export function prefetchAnime(
   prefetchedAnimeIds.add(anime.id);
 
   // Preload only the anime main cover (portada del anime) on hover/focus
-  preloadAnimeCover(anime, studios, true);
+  preloadAnimeCover(anime, studios, true, 'original');
 }
 
 /**
@@ -264,10 +333,10 @@ export function startPrioritizedAppLoading(
 ) {
   if (!animes || animes.length === 0) return;
 
-  // Preload only the top visible hero carousel items (first 4)
+  // Preload only the top visible hero carousel items (first 4) at original resolution
   const heroItems = animes.slice(0, 4);
   heroItems.forEach(anime => {
-    preloadAnimeCover(anime, studios, true);
+    preloadAnimeCover(anime, studios, true, 'original');
   });
 }
 
@@ -278,6 +347,9 @@ interface SmartAnimeCoverProps {
   alt?: string;
   loading?: 'eager' | 'lazy';
   priority?: boolean;
+  tamaño?: PortadaSize;
+  width?: number;
+  height?: number;
 }
 
 export function SmartAnimeCover({ 
@@ -286,9 +358,12 @@ export function SmartAnimeCover({
   className = 'w-full h-full object-cover', 
   alt = '',
   loading = 'lazy',
-  priority = false
+  priority = false,
+  tamaño = 'original',
+  width,
+  height
 }: SmartAnimeCoverProps) {
-  const initialSrc = processImageSrc(anime, studioName);
+  const initialSrc = processImageSrc(anime, studioName, tamaño);
   const [imageSrc, setImageSrc] = useState<string>(initialSrc);
   const [retryCount, setRetryCount] = useState<number>(0);
   const [hasFailed, setHasFailed] = useState<boolean>(false);
@@ -306,7 +381,7 @@ export function SmartAnimeCover({
   // Dominant color placeholder gradient
   const placeholderGradient = getDominantPlaceholderGradient(anime.name, anime.id);
 
-  const propSourceKey = `${anime.id || ''}|${anime.image || ''}|${anime.coverUrl || ''}|${anime.coverData || ''}|${anime.updatedAt || ''}|${studioName || ''}`;
+  const propSourceKey = `${anime.id || ''}|${anime.image || ''}|${anime.coverUrl || ''}|${anime.coverData || ''}|${anime.updatedAt || ''}|${studioName || ''}|${tamaño}`;
   const prevPropSourceKeyRef = useRef<string>(propSourceKey);
 
   useEffect(() => {
@@ -320,14 +395,14 @@ export function SmartAnimeCover({
   useEffect(() => {
     if (prevPropSourceKeyRef.current !== propSourceKey) {
       prevPropSourceKeyRef.current = propSourceKey;
-      const src = processImageSrc(anime, studioName);
+      const src = processImageSrc(anime, studioName, tamaño);
       setImageSrc(src);
       setRetryCount(0);
       setHasFailed(false);
       const instant = src.startsWith('data:') || globalImageCache.has(src) || (anime.id ? globalLoadedAnimeIds.has(anime.id) : false);
       setIsLoaded(Boolean(instant));
     }
-  }, [propSourceKey, anime, studioName]);
+  }, [propSourceKey, anime, studioName, tamaño]);
 
   const handleLoad = () => {
     markAnimeCoverLoaded(anime.id, imageSrc);
@@ -371,6 +446,10 @@ export function SmartAnimeCover({
     setHasFailed(prev => (prev ? prev : true));
   };
 
+  const defaultDims = PORTADA_DIMENSIONS[tamaño];
+  const resolvedWidth = width ?? (!priority ? defaultDims.width : undefined);
+  const resolvedHeight = height ?? (!priority ? defaultDims.height : undefined);
+
   return (
     <div className={`w-full h-full relative overflow-hidden select-none bg-gradient-to-b ${placeholderGradient}`}>
       {/* Calm, stable dark backdrop without flashing pulse animation */}
@@ -386,6 +465,8 @@ export function SmartAnimeCover({
         alt={alt || anime.name || 'Cover'}
         loading={priority ? 'eager' : loading}
         fetchPriority={priority ? 'high' : 'auto'}
+        width={resolvedWidth}
+        height={resolvedHeight}
         decoding="async"
         referrerPolicy="no-referrer"
         onLoad={handleLoad}

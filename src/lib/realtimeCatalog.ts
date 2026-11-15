@@ -1,27 +1,24 @@
 /**
- * Real-time Firestore catalog listener with persistent local caching,
- * prioritized "Últimos episodios" hydration, and seamless silent diff updates.
+ * Real-time Firestore catalog listener backed by Firestore persistentLocalCache.
+ * Emits locally cached data immediately on startup/offline, then streams server changes silently.
  */
 
 import {
   db,
   isFirebaseConfigured,
   collection,
-  doc,
-  query,
-  orderBy,
-  limit,
-  onSnapshot
+  getDocsFromCache,
+  onSnapshot,
+  firebaseConnectionReady
 } from './firebase';
 import { Anime, Studio, Genre, normalizeAnimeYear } from '../types';
 import { normalizeEpisodesList } from '../utils/episodeUtils';
-import { saveCatalogToIDB, applyRecentAdminMutations } from './idbStorage';
-import { saveCatalogToLocalStorage } from './versionSync';
 
 export interface RealtimeCatalogCallbacks {
-  onAnimesUpdate: (animes: Anime[]) => void;
-  onStudiosUpdate: (studios: Studio[]) => void;
-  onGenresUpdate: (genres: Genre[]) => void;
+  onAnimesUpdate: (animes: Anime[], meta: { fromCache: boolean }) => void;
+  onStudiosUpdate: (studios: Studio[], meta: { fromCache: boolean }) => void;
+  onGenresUpdate: (genres: Genre[], meta: { fromCache: boolean }) => void;
+  onInitialReady?: () => void;
 }
 
 export function mapFirestoreAnimeDoc(docSnap: any): Anime {
@@ -101,174 +98,187 @@ export function mapFirestoreGenreDoc(docSnap: any): Genre {
 }
 
 /**
- * Subscribes to catalog collections using real-time Firestore onSnapshot listeners.
- * 
- * - Prioritizes "Últimos episodios" by first listening to recent animes (limit 30)
- * - Automatically handles document additions, modifications, and deletions in real-time
- * - Persists updates to IndexedDB and localStorage seamlessly in background
- * - Operates completely silently without showing alerts or popups when network is offline
+ * Subscribes to animes, studios, and genres using real-time Firestore onSnapshot listeners.
+ * Serves locally persisted data immediately (even offline) and syncs server updates in real time.
  */
 export function subscribeToRealtimeCatalog(callbacks: RealtimeCatalogCallbacks): () => void {
   if (!db || !isFirebaseConfigured) {
+    callbacks.onInitialReady?.();
     return () => {};
   }
+
+  let disposed = false;
   const unsubs: (() => void)[] = [];
   const animeMap = new Map<string, Anime>();
-  let currentStudios: Studio[] = [];
-  let currentGenres: Genre[] = [];
-  let isFullCatalogLoaded = false;
+  let readyEmitted = false;
 
-  const persistCurrentState = () => {
-    try {
-      const animesArray = Array.from(animeMap.values()).sort(sortAnimeCatalog);
-      const normalizedAnimes = applyRecentAdminMutations(animesArray);
-      saveCatalogToIDB(normalizedAnimes, currentStudios, currentGenres).catch(() => {});
-      saveCatalogToLocalStorage(normalizedAnimes, currentStudios, currentGenres);
-    } catch {}
+  const markReady = () => {
+    if (!readyEmitted) {
+      readyEmitted = true;
+      callbacks.onInitialReady?.();
+    }
   };
 
-  try {
-    // 1. PRIORIDAD 1: "Últimos episodios" se escucha primero con limit(30)
-    // Permite que la sección de episodios recientes se actualice inmediatamente en todos los celulares
-    const recentAnimesQuery = query(
-      collection(db, 'animes'),
-      orderBy('updatedAt', 'desc'),
-      limit(30)
-    );
+  const startListeners = async () => {
+    // 1. Hydrate from local persistent cache immediately (0ms) so UI shows cached catalog before network sync
+    try {
+      const [cachedAnimesSnap, cachedStudiosSnap, cachedGenresSnap] = await Promise.all([
+        getDocsFromCache(collection(db, 'animes')).catch(() => null),
+        getDocsFromCache(collection(db, 'studios')).catch(() => null),
+        getDocsFromCache(collection(db, 'genres')).catch(() => null),
+      ]);
 
-    const unsubRecent = onSnapshot(
-      recentAnimesQuery,
-      { includeMetadataChanges: false },
-      (snapshot) => {
-        try {
-          snapshot.docChanges().forEach((change) => {
-            const docId = change.doc.id;
-            if (change.type === 'removed') {
-              // Si se eliminó y el catálogo completo aún no tomó control
-              if (!isFullCatalogLoaded) {
-                animeMap.delete(docId);
-              }
-            } else {
-              const mapped = mapFirestoreAnimeDoc(change.doc);
-              animeMap.set(docId, mapped);
+      if (disposed) return;
+
+      if (cachedStudiosSnap && !cachedStudiosSnap.empty) {
+        const list = cachedStudiosSnap.docs
+          .map(mapFirestoreStudioDoc)
+          .filter((s) => Boolean(s.name))
+          .sort((a, b) => {
+            if (typeof a.orderIndex === 'number' && typeof b.orderIndex === 'number') {
+              return a.orderIndex - b.orderIndex;
             }
+            return (a.order || 10) - (b.order || 10);
           });
-
-          // Si el catálogo completo todavía no ha llegado, emitir los animes recientes de inmediato
-          if (!isFullCatalogLoaded && animeMap.size > 0) {
-            const animesList = Array.from(animeMap.values()).sort(sortAnimeCatalog);
-            callbacks.onAnimesUpdate(applyRecentAdminMutations(animesList));
-            persistCurrentState();
-          }
-        } catch (err) {
-          // Silent catch
-        }
-      },
-      (error) => {
-        // Silent offline fallback
-        console.warn('[Realtime Sync] Modo sin conexión en recientes:', error?.message || error);
+        if (list.length > 0) callbacks.onStudiosUpdate(list, { fromCache: true });
       }
-    );
-    unsubs.push(unsubRecent);
 
-    // 2. PRIORIDAD 2: Catálogo completo de animes (adiciones, ediciones, eliminaciones en tiempo real)
-    const unsubFullAnimes = onSnapshot(
-      collection(db, 'animes'),
-      { includeMetadataChanges: false },
-      (snapshot) => {
-        try {
-          isFullCatalogLoaded = true;
-
-          // Procesar exactamente qué cambió (added, modified, removed)
-          snapshot.docChanges().forEach((change) => {
-            const docId = change.doc.id;
-            if (change.type === 'removed') {
-              animeMap.delete(docId);
-            } else {
-              const mapped = mapFirestoreAnimeDoc(change.doc);
-              animeMap.set(docId, mapped);
+      if (cachedGenresSnap && !cachedGenresSnap.empty) {
+        const list = cachedGenresSnap.docs
+          .map(mapFirestoreGenreDoc)
+          .filter((g) => Boolean(g.name))
+          .sort((a, b) => {
+            if (typeof a.orderIndex === 'number' && typeof b.orderIndex === 'number') {
+              return a.orderIndex - b.orderIndex;
             }
+            return (a.order || 10) - (b.order || 10);
           });
+        if (list.length > 0) callbacks.onGenresUpdate(list, { fromCache: true });
+      }
 
-          // Si es la primera carga inicial del snapshot y por alguna razón docChanges no vino completo
-          if (animeMap.size === 0 && !snapshot.empty) {
-            snapshot.docs.forEach((docSnap) => {
-              const mapped = mapFirestoreAnimeDoc(docSnap);
-              animeMap.set(mapped.id, mapped);
-            });
-          }
-
-          const fullList = Array.from(animeMap.values()).sort(sortAnimeCatalog);
-          const normalized = applyRecentAdminMutations(fullList);
-          callbacks.onAnimesUpdate(normalized);
-          persistCurrentState();
-        } catch (err) {
-          // Silent catch
+      if (cachedAnimesSnap && !cachedAnimesSnap.empty) {
+        cachedAnimesSnap.docs.forEach((docSnap) => {
+          animeMap.set(docSnap.id, mapFirestoreAnimeDoc(docSnap));
+        });
+        const cachedList = Array.from(animeMap.values()).sort(sortAnimeCatalog);
+        if (cachedList.length > 0) {
+          callbacks.onAnimesUpdate(cachedList, { fromCache: true });
+          markReady();
         }
-      },
-      (error) => {
-        console.warn('[Realtime Sync] Modo sin conexión en animes:', error?.message || error);
       }
-    );
-    unsubs.push(unsubFullAnimes);
+    } catch {}
 
-    // 3. Estudios en tiempo real
-    const unsubStudios = onSnapshot(
-      collection(db, 'studios'),
-      { includeMetadataChanges: false },
-      (snapshot) => {
-        try {
-          const list = snapshot.docs
-            .map(mapFirestoreStudioDoc)
-            .filter((s) => Boolean(s.name))
-            .sort((a, b) => {
-              if (typeof a.orderIndex === 'number' && typeof b.orderIndex === 'number') {
-                return a.orderIndex - b.orderIndex;
-              }
-              return (a.order || 10) - (b.order || 10);
-            });
-          currentStudios = list;
-          callbacks.onStudiosUpdate(list);
-          persistCurrentState();
-        } catch (err) {}
-      },
-      (error) => {
-        console.warn('[Realtime Sync] Modo sin conexión en estudios:', error?.message || error);
-      }
-    );
-    unsubs.push(unsubStudios);
+    // 2. Let the lightweight test/connection handshake finish (~80ms when online)
+    // before streaming the heavy animes collection on the shared WatchStream.
+    if (typeof navigator === 'undefined' || navigator.onLine !== false) {
+      await Promise.race([
+        firebaseConnectionReady,
+        new Promise<void>((resolve) => setTimeout(resolve, 600))
+      ]).catch(() => {});
+    }
 
-    // 4. Géneros en tiempo real
-    const unsubGenres = onSnapshot(
-      collection(db, 'genres'),
-      { includeMetadataChanges: false },
-      (snapshot) => {
-        try {
-          const list = snapshot.docs
-            .map(mapFirestoreGenreDoc)
-            .filter((g) => Boolean(g.name))
-            .sort((a, b) => {
-              if (typeof a.orderIndex === 'number' && typeof b.orderIndex === 'number') {
-                return a.orderIndex - b.orderIndex;
-              }
-              return (a.order || 10) - (b.order || 10);
-            });
-          currentGenres = list;
-          callbacks.onGenresUpdate(list);
-          persistCurrentState();
-        } catch (err) {}
-      },
-      (error) => {
-        console.warn('[Realtime Sync] Modo sin conexión en géneros:', error?.message || error);
-      }
-    );
-    unsubs.push(unsubGenres);
-  } catch (err) {
-    console.warn('[Realtime Sync] Error al inicializar escuchadores en tiempo real:', err);
-  }
+    if (disposed) return;
 
-  // Función de desuscripción limpia
+    try {
+      // 3. Animes collection in real time (cache-first via persistentLocalCache, then live server updates)
+      const unsubAnimes = onSnapshot(
+        collection(db, 'animes'),
+        { includeMetadataChanges: false },
+        (snapshot) => {
+          try {
+            const changes = snapshot.docChanges();
+            if (changes.length > 0) {
+              changes.forEach((change) => {
+                const docId = change.doc.id;
+                if (change.type === 'removed') {
+                  animeMap.delete(docId);
+                } else {
+                  const mapped = mapFirestoreAnimeDoc(change.doc);
+                  animeMap.set(docId, mapped);
+                }
+              });
+            } else if (animeMap.size === 0 && !snapshot.empty) {
+              snapshot.docs.forEach((docSnap) => {
+                const mapped = mapFirestoreAnimeDoc(docSnap);
+                animeMap.set(docSnap.id, mapped);
+              });
+            }
+
+            const fullList = Array.from(animeMap.values()).sort(sortAnimeCatalog);
+            if (fullList.length > 0 || !snapshot.metadata.fromCache) {
+              callbacks.onAnimesUpdate(fullList, { fromCache: snapshot.metadata.fromCache });
+              markReady();
+            }
+          } catch {}
+        },
+        (error) => {
+          console.warn('[Realtime Sync] Modo sin conexión en animes:', error?.message || error);
+          markReady();
+        }
+      );
+      unsubs.push(unsubAnimes);
+
+      // 4. Studios collection in real time
+      const unsubStudios = onSnapshot(
+        collection(db, 'studios'),
+        { includeMetadataChanges: false },
+        (snapshot) => {
+          try {
+            const list = snapshot.docs
+              .map(mapFirestoreStudioDoc)
+              .filter((s) => Boolean(s.name))
+              .sort((a, b) => {
+                if (typeof a.orderIndex === 'number' && typeof b.orderIndex === 'number') {
+                  return a.orderIndex - b.orderIndex;
+                }
+                return (a.order || 10) - (b.order || 10);
+              });
+            if (list.length > 0 || !snapshot.metadata.fromCache) {
+              callbacks.onStudiosUpdate(list, { fromCache: snapshot.metadata.fromCache });
+            }
+          } catch {}
+        },
+        (error) => {
+          console.warn('[Realtime Sync] Modo sin conexión en estudios:', error?.message || error);
+        }
+      );
+      unsubs.push(unsubStudios);
+
+      // 5. Genres collection in real time
+      const unsubGenres = onSnapshot(
+        collection(db, 'genres'),
+        { includeMetadataChanges: false },
+        (snapshot) => {
+          try {
+            const list = snapshot.docs
+              .map(mapFirestoreGenreDoc)
+              .filter((g) => Boolean(g.name))
+              .sort((a, b) => {
+                if (typeof a.orderIndex === 'number' && typeof b.orderIndex === 'number') {
+                  return a.orderIndex - b.orderIndex;
+                }
+                return (a.order || 10) - (b.order || 10);
+              });
+            if (list.length > 0 || !snapshot.metadata.fromCache) {
+              callbacks.onGenresUpdate(list, { fromCache: snapshot.metadata.fromCache });
+            }
+          } catch {}
+        },
+        (error) => {
+          console.warn('[Realtime Sync] Modo sin conexión en géneros:', error?.message || error);
+        }
+      );
+      unsubs.push(unsubGenres);
+    } catch (err) {
+      console.warn('[Realtime Sync] Error al inicializar escuchadores en tiempo real:', err);
+      markReady();
+    }
+  };
+
+  startListeners();
+
   return () => {
+    disposed = true;
     unsubs.forEach((unsub) => {
       try {
         unsub();

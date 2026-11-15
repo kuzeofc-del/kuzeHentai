@@ -54,8 +54,9 @@ function GalleryCard({ anime, studios, onClick, index, isNewEpisodesMode, episod
           <img
             src={episodeCoverImage}
             alt={`${anime.name} - Ep ${lastEpisodeNumber}`}
-            loading={isAboveFold ? 'eager' : 'lazy'}
-            fetchPriority={isAboveFold ? 'high' : 'auto'}
+            loading="lazy"
+            width={300}
+            height={450}
             decoding="async"
             className="w-full h-full object-cover"
             referrerPolicy="no-referrer"
@@ -66,8 +67,11 @@ function GalleryCard({ anime, studios, onClick, index, isNewEpisodesMode, episod
             anime={anime}
             studioName={studioName}
             alt={anime.name}
-            loading={isAboveFold ? 'eager' : 'lazy'}
-            priority={isAboveFold}
+            tamaño="vineta"
+            loading="lazy"
+            priority={false}
+            width={300}
+            height={450}
             className="w-full h-full object-cover"
           />
         )}

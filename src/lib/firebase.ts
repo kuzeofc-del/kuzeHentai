@@ -18,6 +18,10 @@ import {
 import { 
   getFirestore, 
   initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  memoryLocalCache,
+  CACHE_SIZE_UNLIMITED,
   setLogLevel,
   collection, 
   addDoc, 
@@ -34,6 +38,8 @@ import {
   onSnapshot, 
   serverTimestamp,
   increment,
+  getDocFromCache,
+  getDocsFromCache,
   getDocFromServer,
   getDocsFromServer,
   deleteField,
@@ -87,18 +93,41 @@ if (isFirebaseConfigured && firebaseConfig) {
 
   authInstance = getAuth(app);
 
+  const firestoreDatabaseId = "(default)";
+  let canUseIndexedDb = false;
+  try {
+    canUseIndexedDb = typeof window !== "undefined" && "indexedDB" in window && window.indexedDB !== null;
+  } catch {
+    canUseIndexedDb = false;
+  }
+
   try {
     firestoreDb = initializeFirestore(app, {
+      localCache: canUseIndexedDb
+        ? persistentLocalCache({
+            tabManager: persistentMultipleTabManager(),
+            cacheSizeBytes: CACHE_SIZE_UNLIMITED
+          })
+        : memoryLocalCache(),
       experimentalAutoDetectLongPolling: true,
       ignoreUndefinedProperties: true
-    });
+    }, firestoreDatabaseId);
     setLogLevel('silent');
   } catch {
     try {
-      firestoreDb = getFirestore(app);
+      firestoreDb = initializeFirestore(app, {
+        localCache: memoryLocalCache(),
+        experimentalAutoDetectLongPolling: true,
+        ignoreUndefinedProperties: true
+      }, firestoreDatabaseId);
       setLogLevel('silent');
     } catch {
-      firestoreDb = null;
+      try {
+        firestoreDb = getFirestore(app, firestoreDatabaseId);
+        setLogLevel('silent');
+      } catch {
+        firestoreDb = null;
+      }
     }
   }
 
@@ -144,16 +173,25 @@ export const configureAuthPersistence = async () => {
   return persistencePromise;
 };
 
-if (isFirebaseConfigured) {
-  configureAuthPersistence().catch(() => {});
-  if (typeof window !== "undefined" && firestoreDb) {
-    getDocFromServer(doc(firestoreDb, "test", "connection")).catch((error) => {
-      if (error instanceof Error && error.message.includes("the client is offline")) {
-        console.error("Please check your Firebase configuration.");
-      }
-    });
+async function testConnection(): Promise<void> {
+  if (!isFirebaseConfigured || typeof window === "undefined" || !firestoreDb) return;
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+  try {
+    await getDocFromServer(doc(firestoreDb, "test", "connection"));
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("the client is offline") &&
+      (typeof navigator === "undefined" || navigator.onLine !== false)
+    ) {
+      console.error("Please check your Firebase configuration.");
+    }
   }
 }
+
+export const firebaseConnectionReady: Promise<void> = isFirebaseConfigured
+  ? (configureAuthPersistence().catch(() => {}), testConnection())
+  : Promise.resolve();
 
 export {
   ref,
@@ -186,6 +224,8 @@ export {
   onSnapshot,
   serverTimestamp,
   increment,
+  getDocFromCache,
+  getDocsFromCache,
   getDocFromServer,
   getDocsFromServer,
   deleteField

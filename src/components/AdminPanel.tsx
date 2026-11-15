@@ -8,7 +8,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { User } from 'firebase/auth';
 import { db, auth, doc, setDoc, deleteDoc, updateDoc, collection, getDocs, getDocsFromServer, deleteField, isFirebaseConfigured } from '../lib/firebase';
 import { Studio, Genre, Anime, DatabaseSchema, getNormalizedKey, normalizeAnimeYear, resolveContinuationGroup, sortAnimesByYearAsc, formatContinuationTitle } from '../types';
-import { SmartAnimeCover, getFallbackSvg, globalCoverDataMap } from '../utils/imageFallback';
+import { SmartAnimeCover, getFallbackSvg, globalCoverDataMap, portadaUrl } from '../utils/imageFallback';
 import { 
   Lock, User as UserIcon, LogOut, Plus, Trash2, Edit2, Save, EyeOff, Eye, Upload, Folder,
   Settings, Database, RefreshCw, Layers, Film, Tag, ArrowLeft, Download, Check, AlertCircle, Search, Building2, Sparkles,
@@ -5024,7 +5024,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                     >
                       {animeImage ? (
                         <>
-                          <img src={animeImage} alt="Vista previa" className="absolute inset-0 w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" />
+                          <img src={portadaUrl(animeImage, 'horizontal')} alt="Vista previa" width={600} height={900} className="absolute inset-0 w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" />
                           <CoverPreviewSizeBadge src={animeImage} showSourceType />
                           <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col items-center justify-center gap-2">
                             <Upload className="h-6 w-6 text-white animate-bounce" />
@@ -5669,6 +5669,10 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                                       anime={linked}
                                       studioName={stName}
                                       alt={linked.name}
+                                      tamaño="mini"
+                                      loading="lazy"
+                                      width={150}
+                                      height={225}
                                       className="w-full h-full object-cover"
                                     />
                                     <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/45 to-transparent p-1 pt-3 pointer-events-none">
@@ -5966,6 +5970,10 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                                                 anime={item}
                                                 studioName={stName}
                                                 alt={item.name}
+                                                tamaño="mini"
+                                                loading="lazy"
+                                                width={150}
+                                                height={225}
                                                 className="w-full h-full object-cover"
                                               />
                                             </div>
@@ -6191,7 +6199,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                               className="relative shrink-0 w-11 h-15 sm:w-12 sm:h-16 rounded-md overflow-hidden border border-[#2b174d] hover:border-purple-500 shadow-md group cursor-pointer active:scale-95 transition-all text-left"
                               title="Tocar foto para editar anime"
                             >
-                              <SmartAnimeCover anime={anime} studioName={sName} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                              <SmartAnimeCover anime={anime} studioName={sName} tamaño="mini" loading="lazy" width={150} height={225} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
                               <div className="absolute inset-0 bg-black/0 group-hover:bg-purple-900/40 flex items-center justify-center transition-colors">
                                 <Edit2 className="h-3.5 w-3.5 text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow" />
                               </div>
@@ -6528,8 +6536,12 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                           >
                             {studioCover ? (
                               <img
-                                src={studioCover}
+                                src={portadaUrl(studioCover, 'mini')}
                                 alt={studio.name}
+                                loading="lazy"
+                                decoding="async"
+                                width={150}
+                                height={150}
                                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                               />
                             ) : (
@@ -6741,8 +6753,12 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                           >
                             {genreCover ? (
                               <img
-                                src={genreCover}
+                                src={portadaUrl(genreCover, 'mini')}
                                 alt={genre.name}
+                                loading="lazy"
+                                decoding="async"
+                                width={150}
+                                height={150}
                                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                               />
                             ) : (
@@ -7251,7 +7267,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                           {group.map(a => (
                             <div key={a.id} className="flex items-center gap-2 bg-dark-card px-2 py-1 rounded border border-dark-border text-[10px]">
                               <div className="w-5 h-7 bg-neutral-900 rounded overflow-hidden shrink-0">
-                                <SmartAnimeCover anime={a} className="w-full h-full object-cover" />
+                                <SmartAnimeCover anime={a} tamaño="mini" loading="lazy" width={150} height={225} className="w-full h-full object-cover" />
                               </div>
                               <span className="font-medium text-white truncate max-w-[150px]">{a.name}</span>
                               <span className="text-neutral-500 font-mono text-[9px]">({a.downloads || 0} descargas)</span>
@@ -7275,7 +7291,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                           {group.map(a => (
                             <div key={a.id} className="flex items-center gap-2 bg-dark-card px-2 py-1 rounded border border-dark-border text-[10px]">
                               <div className="w-5 h-7 bg-neutral-900 rounded overflow-hidden shrink-0">
-                                <SmartAnimeCover anime={a} className="w-full h-full object-cover" />
+                                <SmartAnimeCover anime={a} tamaño="mini" loading="lazy" width={150} height={225} className="w-full h-full object-cover" />
                               </div>
                               <span className="text-neutral-300 font-mono text-[9px] truncate max-w-[180px]">{a.telegramUrl}</span>
                             </div>
@@ -7521,7 +7537,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-center gap-3 min-w-0">
                     <div className="w-14 h-20 bg-neutral-900 border border-purple-500/30 rounded-lg overflow-hidden shrink-0 shadow">
-                      <SmartAnimeCover anime={selectedAnimeDetails} studioName={sName} className="w-full h-full object-cover" />
+                      <SmartAnimeCover anime={selectedAnimeDetails} studioName={sName} tamaño="mini" loading="lazy" width={150} height={225} className="w-full h-full object-cover" />
                     </div>
                     <div className="min-w-0 space-y-0.5">
                       <h3 className="font-sans font-bold text-sm sm:text-base text-white leading-snug line-clamp-2">

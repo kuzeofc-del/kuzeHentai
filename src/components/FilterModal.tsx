@@ -7,6 +7,7 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import { Studio, Genre, Anime, normalizeAnimeYear } from '../types';
 import { X, RotateCcw, Check, SlidersHorizontal } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { portadaUrl } from '../utils/imageFallback';
 
 export interface FilterModalProps {
   isOpen: boolean;
@@ -408,8 +409,12 @@ function FilterModal({
                         >
                           {studio.image && (
                             <img
-                              src={studio.image}
+                              src={portadaUrl(studio.image, 'mini')}
                               alt=""
+                              loading="lazy"
+                              decoding="async"
+                              width={150}
+                              height={150}
                               className="w-3.5 h-3.5 rounded-full object-cover shrink-0"
                               onError={e => {
                                 (e.target as HTMLElement).style.display = 'none';
