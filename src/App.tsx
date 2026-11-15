@@ -62,7 +62,7 @@ import { getRecommendedAnimes } from './utils/recommendationManager';
 
 const AdminPanel = React.lazy(() => import('./components/AdminPanel'));
 import { SmartAnimeCover, portadaUrl, processImageSrc, globalImageCache, preloadAllAnimes, preloadAnimeCover, getFallbackSvg, startPrioritizedAppLoading, prefetchAnime, prefetchCatalogPage } from './utils/imageFallback';
-import { startCatalogIdlePreload } from './lib/coverCache';
+import { startCatalogIdlePreload, preloadPortadasBatch, triggerCoversReobserve } from './lib/coverCache';
 import { normalizeEpisodesList } from './utils/episodeUtils';
 import { enforceEpisodesRotation } from './utils/episodeRotation';
 import { getAnimeRatingStats } from './utils/ratingManager';
@@ -616,7 +616,9 @@ export default function App() {
   const [genres, setGenres] = useState<Genre[]>([]);
   const [animes, setAnimes] = useState<Anime[]>([]);
   const [directLoadedAnime, setDirectLoadedAnime] = useState<Anime | null>(null);
+  const [catalogReady, setCatalogReady] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
+  const homeWarmupStartedRef = useRef<boolean>(false);
 
   // Search & Filters state
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -852,7 +854,7 @@ export default function App() {
             startPrioritizedAppLoading(normalizedAnimes, studiosRef.current);
           }
         }
-        setLoading(false);
+        setCatalogReady(true);
       },
       onStudiosUpdate: (nextStudios) => {
         if (isCancelled) return;
@@ -874,7 +876,7 @@ export default function App() {
       },
       onInitialReady: () => {
         if (!isCancelled) {
-          setLoading(false);
+          setCatalogReady(true);
         }
       }
     });
@@ -883,6 +885,7 @@ export default function App() {
     const isDeviceOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
     const offlineSafetyTimer = setTimeout(() => {
       if (!isCancelled) {
+        setCatalogReady(true);
         setLoading(false);
       }
     }, isDeviceOffline ? 2500 : 120000);
@@ -2027,7 +2030,10 @@ export default function App() {
 
   const catalogPreloadCandidates = useMemo(() => {
     if (isCatalogSearchOpen) {
-      return catalogSearchSectionAnimes.slice(0, catalogSearchVisibleCount + 24);
+      return [
+        ...catalogSearchSectionAnimes.slice(0, catalogSearchVisibleCount),
+        ...catalogSearchSectionAnimes.slice(catalogSearchVisibleCount, catalogSearchVisibleCount + 24),
+      ];
     }
     const seen = new Set<string>();
     const combined: Anime[] = [];
@@ -2039,26 +2045,20 @@ export default function App() {
         }
       }
     };
-    addList(recommendedAnimes);
-    addList(latestCatalogAnimes);
-    addList(top10Animes);
-    addList(upcomingSectionAnimes);
-    addList(myListSectionAnimes);
-    addList(catalogSectionAnimes.slice(0, 60));
+    addList(upcomingSectionAnimes.slice(0, 12));
+    addList(myListSectionAnimes.slice(0, 12));
+    addList(catalogSectionAnimes.slice(0, 24));
     return combined;
   }, [
     isCatalogSearchOpen,
     catalogSearchSectionAnimes,
     catalogSearchVisibleCount,
-    recommendedAnimes,
-    latestCatalogAnimes,
-    top10Animes,
     upcomingSectionAnimes,
     myListSectionAnimes,
     catalogSectionAnimes,
   ]);
 
-  // Precarga en segundo plano cuando el navegador esté libre; cancela al salir del catálogo
+  // Precarga en segundo plano (máx. 24 siguientes, de a 12 por lote, desactivado con Save-Data); cancela al salir
   useEffect(() => {
     if (loading || currentPage !== 'home' || catalogPreloadCandidates.length === 0) {
       return;
@@ -2069,6 +2069,13 @@ export default function App() {
       controller.abort();
     };
   }, [loading, currentPage, catalogPreloadCandidates]);
+
+  // Re-evaluate IntersectionObserver when catalog lists, search state, or active page change
+  useEffect(() => {
+    if (loading) return;
+    const raf = requestAnimationFrame(() => triggerCoversReobserve());
+    return () => cancelAnimationFrame(raf);
+  }, [loading, currentPage, isCatalogSearchOpen, catalogSearchVisibleCount, catalogSectionAnimes, sortedAnimes]);
 
   const totalCatalogPages = useMemo(() => {
     return Math.max(1, Math.ceil(sortedAnimes.length / ITEMS_PER_PAGE));
@@ -2334,6 +2341,62 @@ export default function App() {
   const heroFeaturedAnimes = React.useMemo(() => {
     return computeHeroFeaturedAnimes(animes, studios);
   }, [animes, studios, ratingVersion, heroCycleVersion]);
+
+  // --- Precarga inicial de portadas del inicio (caché Firestore en paralelo + faltantes en lotes de 30, máx 3s) ---
+  useEffect(() => {
+    if (!catalogReady || !loading) return;
+    const hardTimer = setTimeout(() => {
+      setLoading(false);
+    }, 3000);
+    return () => clearTimeout(hardTimer);
+  }, [catalogReady, loading]);
+
+  useEffect(() => {
+    if (!catalogReady || !loading || homeWarmupStartedRef.current) return;
+    homeWarmupStartedRef.current = true;
+
+    if (animes.length === 0) {
+      setLoading(false);
+      return;
+    }
+
+    const homeWarmupAnimes: Anime[] = [];
+    const seenIds = new Set<string>();
+    const pushList = (list: Anime[]) => {
+      for (const a of list) {
+        if (a?.id && !seenIds.has(a.id)) {
+          seenIds.add(a.id);
+          homeWarmupAnimes.push(a);
+        }
+      }
+    };
+
+    if (currentAnime) pushList([currentAnime]);
+    pushList(heroFeaturedAnimes);
+    pushList(recommendedAnimes);
+    pushList(recentEpisodes.filter(ep => !ep.coverImage).map(ep => ep.anime));
+    pushList(recentEpisodes.slice(0, 15).map(ep => ep.anime));
+    pushList(latestCatalogAnimes);
+    pushList(top10Animes);
+    pushList(catalogSectionAnimes.slice(0, 18));
+
+    preloadPortadasBatch(homeWarmupAnimes, { maxWaitMs: 3000 })
+      .catch(() => {})
+      .finally(() => {
+        setLoading(false);
+      });
+  }, [
+    catalogReady,
+    loading,
+    animes.length,
+    currentAnime,
+    heroFeaturedAnimes,
+    recommendedAnimes,
+    recentEpisodes,
+    latestCatalogAnimes,
+    top10Animes,
+    catalogSectionAnimes,
+  ]);
 
   // Render Section Selector helper
   const scrollToExplore = () => {

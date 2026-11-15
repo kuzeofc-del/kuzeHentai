@@ -4,6 +4,8 @@ import {
   resolveAnimeCoverBase64,
   getSyncCachedPortada,
   isExternalHttpCover,
+  subscribePortadaReady,
+  isSaveDataEnabled,
 } from '../lib/coverCache';
 
 export type PortadaSize =
@@ -286,11 +288,14 @@ export function startPrioritizedAppLoading(
 /**
  * Two-tier IntersectionObserver hook:
  * - Level 1 (visible, rootMargin 300px): immediate server priority.
- * - Level 2 (anticipated, rootMargin 1200px): deferred until visible requests finish,
- *   and tracks exit so fast scrolling cancels/ignores off-range anticipated requests.
+ * - Level 2 (anticipated, rootMargin 1500px): deferred until visible requests finish.
+ * - Uses callback ref + resetKey + `kh_reobserve_covers` event so observers always re-attach
+ *   when lists sort, paginate, or remount. Never cancels active fetches on exit.
  */
-export function useInViewTwoTier(priority: boolean = false) {
-  const ref = useRef<HTMLDivElement | null>(null);
+export function useInViewTwoTier(priority: boolean = false, resetKey: string = '') {
+  const [observerEl, setObserverEl] = useState<HTMLDivElement | null>(null);
+  const [reobserveTick, setReobserveTick] = useState<number>(0);
+
   const [isVisible, setIsVisible] = useState<boolean>(() => {
     if (priority) return true;
     if (typeof window === 'undefined' || typeof IntersectionObserver === 'undefined') return true;
@@ -302,6 +307,38 @@ export function useInViewTwoTier(priority: boolean = false) {
     return false;
   });
 
+  const prevResetKeyRef = useRef<string>(resetKey);
+  useEffect(() => {
+    if (prevResetKeyRef.current !== resetKey) {
+      prevResetKeyRef.current = resetKey;
+      if (priority || typeof IntersectionObserver === 'undefined') {
+        setIsVisible(true);
+        setIsAnticipated(true);
+      } else {
+        setIsVisible(false);
+        setIsAnticipated(false);
+      }
+    }
+  }, [resetKey, priority]);
+
+  useEffect(() => {
+    if (priority) {
+      setIsVisible(true);
+      setIsAnticipated(true);
+    }
+  }, [priority]);
+
+  useEffect(() => {
+    if (priority || isVisible || typeof window === 'undefined') return;
+    const handleReobserve = () => {
+      setReobserveTick((t) => t + 1);
+    };
+    window.addEventListener('kh_reobserve_covers', handleReobserve);
+    return () => {
+      window.removeEventListener('kh_reobserve_covers', handleReobserve);
+    };
+  }, [priority, isVisible]);
+
   useEffect(() => {
     if (priority || isVisible) return;
     if (typeof IntersectionObserver === 'undefined') {
@@ -309,8 +346,7 @@ export function useInViewTwoTier(priority: boolean = false) {
       setIsAnticipated(true);
       return;
     }
-    const el = ref.current;
-    if (!el) return;
+    if (!observerEl) return;
 
     const visibleObserver = new IntersectionObserver(
       (entries) => {
@@ -330,22 +366,26 @@ export function useInViewTwoTier(priority: boolean = false) {
     const anticipatedObserver = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
-          setIsAnticipated(entry.isIntersecting);
+          if (entry.isIntersecting) {
+            setIsAnticipated(true);
+            anticipatedObserver.disconnect();
+            break;
+          }
         }
       },
-      { rootMargin: '1200px' }
+      { rootMargin: '1500px' }
     );
 
-    visibleObserver.observe(el);
-    anticipatedObserver.observe(el);
+    visibleObserver.observe(observerEl);
+    anticipatedObserver.observe(observerEl);
 
     return () => {
       visibleObserver.disconnect();
       anticipatedObserver.disconnect();
     };
-  }, [priority, isVisible]);
+  }, [priority, isVisible, observerEl, resetKey, reobserveTick]);
 
-  return { ref, isVisible, isAnticipated };
+  return { ref: setObserverEl, isVisible, isAnticipated };
 }
 
 interface SmartAnimeCoverProps {
@@ -407,20 +447,37 @@ export function SmartAnimeCover({
     return '';
   };
 
+  const propSourceKey = `${anime.id || ''}|${anime.image || ''}|${anime.coverUrl || ''}|${anime.portadaVersion ?? ''}|${anime.updatedAt || ''}|${studioName || ''}|${tamaño}`;
   const initialMemHit = getSyncMemoryHit();
+
   const [shouldSkipFade, setShouldSkipFade] = useState<boolean>(() => Boolean(initialMemHit));
   const [imageSrc, setImageSrc] = useState<string>(() => initialMemHit);
   const [retryCount, setRetryCount] = useState<number>(0);
   const [hasFailed, setHasFailed] = useState<boolean>(false);
   const [isLoaded, setIsLoaded] = useState<boolean>(() => Boolean(initialMemHit));
 
-  const { ref: observerRef, isVisible, isAnticipated } = useInViewTwoTier(priority || shouldSkipFade);
+  // Synchronous memory hit check on render so preloaded covers show immediately with zero placeholder or fade
+  const syncMemHitOnRender = !imageSrc ? getSyncMemoryHit() : '';
+  const effectiveImageSrc = imageSrc || syncMemHitOnRender;
+  const effectiveLoaded = isLoaded || Boolean(syncMemHitOnRender);
+  const effectiveSkipFade = shouldSkipFade || Boolean(syncMemHitOnRender);
+
+  const { ref: observerRef, isVisible, isAnticipated } = useInViewTwoTier(
+    priority || effectiveSkipFade,
+    propSourceKey
+  );
 
   const imgRef = useRef<HTMLImageElement | null>(null);
   const decodedSrcRef = useRef<string>('');
   const mountedRef = useRef<boolean>(true);
-  const currentImageSrcRef = useRef<string>(imageSrc);
-  currentImageSrcRef.current = imageSrc;
+  const activeKeyRef = useRef<string>(propSourceKey);
+  activeKeyRef.current = propSourceKey;
+  const firedTierRef = useRef<{ key: string; tier: 'none' | 'cacheOnly' | 'anticipated' | 'visible' }>({
+    key: propSourceKey,
+    tier: 'none',
+  });
+  const currentImageSrcRef = useRef<string>(effectiveImageSrc);
+  currentImageSrcRef.current = effectiveImageSrc;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -429,7 +486,6 @@ export function SmartAnimeCover({
     };
   }, []);
 
-  const propSourceKey = `${anime.id || ''}|${anime.image || ''}|${anime.coverUrl || ''}|${anime.portadaVersion ?? ''}|${anime.updatedAt || ''}|${studioName || ''}|${tamaño}`;
   const prevKeyRef = useRef<string>(propSourceKey);
 
   // Reset state if anime / version changes; skip placeholder & fade if already in session memory
@@ -437,6 +493,7 @@ export function SmartAnimeCover({
     if (prevKeyRef.current !== propSourceKey) {
       prevKeyRef.current = propSourceKey;
       decodedSrcRef.current = '';
+      firedTierRef.current = { key: propSourceKey, tier: 'none' };
       setRetryCount(0);
       setHasFailed(false);
       const nextSync = getSyncMemoryHit();
@@ -447,7 +504,41 @@ export function SmartAnimeCover({
     }
   }, [propSourceKey]);
 
-  // Two-tier cover resolution: visible (300px) immediate priority vs anticipated (1200px) cancellable
+  // Keep local state synced if render saw a synchronous memory hit while state was still empty
+  useEffect(() => {
+    if (!imageSrc && syncMemHitOnRender) {
+      setShouldSkipFade(true);
+      setImageSrc(syncMemHitOnRender);
+      setIsLoaded(true);
+      setHasFailed(false);
+    }
+  }, [imageSrc, syncMemHitOnRender]);
+
+  // Pub-sub subscription: if any batch (home warmup, similar titles, studio/genre, idle) loads this ID, update immediately
+  useEffect(() => {
+    if (!isBase64Flow || !anime.id || effectiveImageSrc) return;
+    const targetKey = propSourceKey;
+
+    return subscribePortadaReady(String(anime.id), (data, meta) => {
+      if (!mountedRef.current || activeKeyRef.current !== targetKey) return;
+      if (expectedVersion !== undefined && data.portadaVersion !== expectedVersion) return;
+      if (currentImageSrcRef.current) return;
+
+      if (meta.fromCache) {
+        setShouldSkipFade(true);
+        setImageSrc(data.imagen);
+        setIsLoaded(true);
+        setHasFailed(false);
+      } else {
+        setShouldSkipFade(false);
+        setImageSrc(data.imagen);
+        setHasFailed(false);
+      }
+    });
+  }, [isBase64Flow, anime.id, effectiveImageSrc, propSourceKey, expectedVersion]);
+
+  // Two-tier cover resolution: visible (300px) immediate priority vs anticipated (1500px).
+  // Never cancels in-flight requests when cards leave range.
   useEffect(() => {
     if (!isVisible && !isAnticipated) return;
     if (currentImageSrcRef.current) return;
@@ -469,19 +560,42 @@ export function SmartAnimeCover({
       return;
     }
 
-    const controller = new AbortController();
-    let cancelled = false;
-    const priorityTier = isVisible ? 'visible' : 'anticipated';
+    if (firedTierRef.current.key !== propSourceKey) {
+      firedTierRef.current = { key: propSourceKey, tier: 'none' };
+    }
+
+    const saveData = isSaveDataEnabled();
+    const desiredTier: 'cacheOnly' | 'anticipated' | 'visible' = isVisible
+      ? 'visible'
+      : saveData
+      ? 'cacheOnly'
+      : 'anticipated';
+
+    const rank: Record<'none' | 'cacheOnly' | 'anticipated' | 'visible', number> = {
+      none: 0,
+      cacheOnly: 1,
+      anticipated: 2,
+      visible: 3,
+    };
+
+    if (rank[firedTierRef.current.tier] >= rank[desiredTier]) {
+      return;
+    }
+    firedTierRef.current.tier = desiredTier;
+
+    const targetKey = propSourceKey;
+    const priorityTier: 'visible' | 'anticipated' = isVisible ? 'visible' : 'anticipated';
+    const cacheOnly = desiredTier === 'cacheOnly';
 
     resolveAnimeCoverBase64(anime, {
       priority: priorityTier,
-      signal: controller.signal,
+      cacheOnly,
     })
       .then((result) => {
-        if (cancelled || controller.signal.aborted) return;
+        if (!mountedRef.current || activeKeyRef.current !== targetKey) return;
+        if (currentImageSrcRef.current) return;
         if (result?.imagen) {
           if (result.fromCache) {
-            // Instant display with no fade when already in memory Map or Firestore cache
             setShouldSkipFade(true);
             setImageSrc(result.imagen);
             setIsLoaded(true);
@@ -493,24 +607,19 @@ export function SmartAnimeCover({
           }
           return;
         }
-        // If anticipated request returned null (e.g. cancelled or cache miss), only fallback when visible
-        if (priorityTier === 'visible') {
+        if (priorityTier === 'visible' && !cacheOnly) {
           const fallbackPath = processImageSrc(anime, studioName, tamaño);
           setImageSrc(fallbackPath);
         }
       })
       .catch(() => {
-        if (cancelled || controller.signal.aborted) return;
-        if (priorityTier === 'visible') {
+        if (!mountedRef.current || activeKeyRef.current !== targetKey) return;
+        if (currentImageSrcRef.current) return;
+        if (priorityTier === 'visible' && !cacheOnly) {
           const fallbackPath = processImageSrc(anime, studioName, tamaño);
           setImageSrc(fallbackPath);
         }
       });
-
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
   }, [isVisible, isAnticipated, externalHttpUrl, propSourceKey, anime, studioName, tamaño, expectedVersion]);
 
   const revealImageAfterDecode = async (targetSrc: string) => {
@@ -544,27 +653,27 @@ export function SmartAnimeCover({
 
   // Trigger decode (max 150ms) + 120ms fade if image completed synchronously in DOM
   useEffect(() => {
-    if (shouldSkipFade || !imageSrc) return;
+    if (effectiveSkipFade || !effectiveImageSrc) return;
     if (imgRef.current && imgRef.current.complete && imgRef.current.naturalWidth > 0) {
-      revealImageAfterDecode(imageSrc);
+      revealImageAfterDecode(effectiveImageSrc);
     }
-  }, [imageSrc, shouldSkipFade]);
+  }, [effectiveImageSrc, effectiveSkipFade]);
 
   const handleLoad = () => {
-    if (shouldSkipFade) {
-      if (imageSrc && !isBase64Flow) {
-        globalImageCache.add(imageSrc);
+    if (effectiveSkipFade) {
+      if (effectiveImageSrc && !isBase64Flow) {
+        globalImageCache.add(effectiveImageSrc);
       }
       setIsLoaded(true);
       return;
     }
-    revealImageAfterDecode(imageSrc);
+    revealImageAfterDecode(effectiveImageSrc);
   };
 
   const handleError = () => {
     if (retryCount === 0 && anime.id) {
       const nextSrc = `/covers/${anime.id}.webp`;
-      if (imageSrc !== nextSrc) {
+      if (effectiveImageSrc !== nextSrc) {
         setRetryCount(1);
         setImageSrc(nextSrc);
         if (globalImageCache.has(nextSrc)) {
@@ -575,7 +684,7 @@ export function SmartAnimeCover({
       }
     }
     if (retryCount <= 1 && anime.coverData && anime.coverData.startsWith('data:image/')) {
-      if (imageSrc !== anime.coverData) {
+      if (effectiveImageSrc !== anime.coverData) {
         setRetryCount(2);
         setShouldSkipFade(true);
         setImageSrc(anime.coverData);
@@ -585,14 +694,14 @@ export function SmartAnimeCover({
     }
     if (retryCount <= 2 && anime.id) {
       const nextSrc = `/api/covers/${anime.id}.webp`;
-      if (imageSrc !== nextSrc) {
+      if (effectiveImageSrc !== nextSrc) {
         setRetryCount(3);
         setImageSrc(nextSrc);
         return;
       }
     }
     const svgFallback = getFallbackSvg(anime.name, studioName);
-    if (imageSrc !== svgFallback) {
+    if (effectiveImageSrc !== svgFallback) {
       setImageSrc(svgFallback);
     }
     setShouldSkipFade(true);
@@ -604,7 +713,7 @@ export function SmartAnimeCover({
   const resolvedWidth = width ?? (!priority ? defaultDims.width : undefined);
   const resolvedHeight = height ?? (!priority ? defaultDims.height : undefined);
 
-  const showPlaceholder = !isLoaded && !hasFailed;
+  const showPlaceholder = !effectiveLoaded && !hasFailed;
   const fixedAspectClass = PORTADA_ASPECT_CLASS[tamaño];
 
   const wrapperClass = naturalSize
@@ -622,10 +731,10 @@ export function SmartAnimeCover({
         <div className="absolute inset-0 bg-[#a855f7]/15 pointer-events-none" />
       )}
 
-      {imageSrc && (
+      {effectiveImageSrc && (
         <img
           ref={imgRef}
-          src={imageSrc}
+          src={effectiveImageSrc}
           alt={alt || anime.name || 'Cover'}
           loading={priority ? 'eager' : loading}
           fetchPriority={priority ? 'high' : 'auto'}
@@ -637,10 +746,10 @@ export function SmartAnimeCover({
           onError={handleError}
           style={naturalSize ? { WebkitTouchCallout: 'default', WebkitUserSelect: 'auto', userSelect: 'auto' } : undefined}
           className={
-            shouldSkipFade
+            effectiveSkipFade
               ? className
               : `${className} transition-opacity duration-[120ms] ease-out ${
-                  isLoaded ? 'opacity-100' : 'opacity-0'
+                  effectiveLoaded ? 'opacity-100' : 'opacity-0'
                 }`
           }
         />

@@ -16,7 +16,13 @@ import {
   ArrowUpDown 
 } from 'lucide-react';
 import { getAnimeRatingStats } from '../utils/ratingManager';
-import { getFallbackSvg, preloadAllAnimes, portadaUrl, SmartAnimeCover } from '../utils/imageFallback';
+import { getFallbackSvg, portadaUrl, SmartAnimeCover } from '../utils/imageFallback';
+import {
+  preloadPortadasBatch,
+  preloadPortadasIdleChunks,
+  isSaveDataEnabled,
+  triggerCoversReobserve,
+} from '../lib/coverCache';
 import GalleryCard from './GalleryCard';
 
 export type GenreSortType = 'name-asc' | 'name-desc' | 'rating-desc' | 'rating-asc' | 'date-desc' | 'date-asc';
@@ -206,15 +212,54 @@ export default function GenreDetailModal({
     }
   }, [initialScrollY, genre.id]);
 
-  // Prioritize preloading genre anime covers gently after render
+  // Immediately batch-load up to 60 genre anime covers without waiting for scroll;
+  // load remaining (>60) in idle batches of 30 unless Data Saver is enabled
   useEffect(() => {
-    if (paginatedAnimes.length > 0) {
-      const timer = setTimeout(() => {
-        preloadAllAnimes(paginatedAnimes, studios);
-      }, 150);
-      return () => clearTimeout(timer);
+    if (sortedGenreAnimes.length === 0) return;
+
+    const ordered: Anime[] = [];
+    const seen = new Set<string>();
+    for (const a of paginatedAnimes) {
+      if (a?.id && !seen.has(a.id)) {
+        seen.add(a.id);
+        ordered.push(a);
+      }
     }
-  }, [paginatedAnimes, studios]);
+    for (const a of sortedGenreAnimes) {
+      if (a?.id && !seen.has(a.id)) {
+        seen.add(a.id);
+        ordered.push(a);
+      }
+    }
+
+    const immediateList = ordered.slice(0, 60);
+    const restList = ordered.slice(60);
+    const controller = new AbortController();
+
+    preloadPortadasBatch(immediateList)
+      .then(() => {
+        if (!controller.signal.aborted && restList.length > 0 && !isSaveDataEnabled()) {
+          return preloadPortadasIdleChunks(restList, controller.signal, 30);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      controller.abort();
+    };
+  }, [genre.id, sortedGenreAnimes, paginatedAnimes]);
+
+  // Re-attach/re-evaluate IntersectionObserver after modal entrance, sort, or page change
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => triggerCoversReobserve());
+    const t1 = setTimeout(() => triggerCoversReobserve(), 80);
+    const t2 = setTimeout(() => triggerCoversReobserve(), 260);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [genre.id, safeCurrentPage, sortBy, paginatedAnimes]);
 
   // Gesto de deslizamiento (swipe hacia la derecha) para volver suavemente
   useEffect(() => {

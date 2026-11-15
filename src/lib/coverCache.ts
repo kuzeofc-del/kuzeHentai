@@ -25,24 +25,30 @@ export interface ResolvedPortadaResult {
 const VISIBLE_BATCH_WINDOW_MS = 16;
 const ANTICIPATED_BATCH_WINDOW_MS = 35;
 const FIRESTORE_IN_QUERY_MAX = 30;
+const BATCH_SERVER_TIMEOUT_MS = 4000;
+const SINGLE_DOC_MAX_RETRIES = 2;
 const PRELOAD_BATCH_LIMIT = 12;
+const PRELOAD_TOTAL_LIMIT = 24;
 
 // In-memory session cache for covers already read in this session
 const memoryPortadaCache = new Map<string, PortadaData>();
 
+// Global deduplication map for EVERY active server fetch by animeId (across all tiers & batch preloaders)
+const inFlightServerById = new Map<string, Promise<PortadaData | null>>();
+
+// Pub-sub listeners so any mounted SmartAnimeCover waiting on an ID updates the instant it arrives
+type PortadaReadyListener = (data: PortadaData, meta: { fromCache: boolean }) => void;
+const portadaReadyListeners = new Map<string, Set<PortadaReadyListener>>();
+
 // Tier 1: Visible requests (rootMargin 300px) — immediate, 16ms grouping, chunks up to 30
 const visibleQueue = new Map<string, Array<(result: PortadaData | null) => void>>();
-const inFlightVisible = new Map<string, Promise<PortadaData | null>>();
+const pendingVisiblePromises = new Map<string, Promise<PortadaData | null>>();
 let visibleBatchTimer: ReturnType<typeof setTimeout> | null = null;
 let activeVisibleBatches = 0;
 
-// Tier 2: Anticipated requests (rootMargin 1200px) — waits until visible queue is idle; cancellable on fast scroll
-interface AnticipatedWaiter {
-  resolve: (result: PortadaData | null) => void;
-  signal?: AbortSignal;
-}
-const anticipatedQueue = new Map<string, Set<AnticipatedWaiter>>();
-const inFlightAnticipated = new Map<string, Promise<PortadaData | null>>();
+// Tier 2: Anticipated requests (rootMargin 1500px) — waits until visible queue is idle; never cancelled mid-flight
+const anticipatedQueue = new Map<string, Array<(result: PortadaData | null) => void>>();
+const pendingAnticipatedPromises = new Map<string, Promise<PortadaData | null>>();
 let anticipatedBatchTimer: ReturnType<typeof setTimeout> | null = null;
 let activeAnticipatedBatches = 0;
 
@@ -50,16 +56,70 @@ let activeAnticipatedBatches = 0;
 const visibleIdleListeners = new Set<() => void>();
 const foregroundIdleListeners = new Set<() => void>();
 
-// Tier 3: Background idle preload lock (max 1 batch at a time, max 12 cards per batch)
+// Tier 3: Background idle preload lock (max 1 batch at a time)
 let isPreloadBatchRunning = false;
 
 // Direct single-doc deduplication (used by AdminPanel edit/export)
 const inFlightDirectRequests = new Map<string, Promise<PortadaData | null>>();
 
+export function isSaveDataEnabled(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const conn = (navigator as Navigator & {
+    connection?: { saveData?: boolean };
+  }).connection;
+  return Boolean(conn?.saveData);
+}
+
+export function triggerCoversReobserve(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.dispatchEvent(new Event('kh_reobserve_covers'));
+  } catch {}
+}
+
 export function isExternalHttpCover(anime: Partial<Anime>): boolean {
   const img = (anime.image || '').trim();
   const cUrl = (anime.coverUrl || '').trim();
   return /^https?:\/\//i.test(img) || /^https?:\/\//i.test(cUrl);
+}
+
+function setPortadaInMemoryAndNotify(
+  animeId: string,
+  entry: PortadaData,
+  fromCache: boolean
+): void {
+  if (!animeId || !entry.imagen || !entry.imagen.startsWith('data:image')) return;
+  memoryPortadaCache.set(animeId, entry);
+  const listeners = portadaReadyListeners.get(animeId);
+  if (listeners && listeners.size > 0) {
+    listeners.forEach((cb) => {
+      try {
+        cb(entry, { fromCache });
+      } catch {}
+    });
+  }
+}
+
+export function subscribePortadaReady(
+  animeId: string,
+  listener: PortadaReadyListener
+): () => void {
+  if (!animeId) return () => {};
+  let set = portadaReadyListeners.get(animeId);
+  if (!set) {
+    set = new Set();
+    portadaReadyListeners.set(animeId, set);
+  }
+  set.add(listener);
+  return () => {
+    const current = portadaReadyListeners.get(animeId);
+    if (current) {
+      current.delete(listener);
+      if (current.size === 0) {
+        portadaReadyListeners.delete(animeId);
+      }
+    }
+  };
 }
 
 export function getSyncCachedPortada(
@@ -81,10 +141,14 @@ export function upsertPortadaMemoryCache(
   portadaVersion: number
 ): void {
   if (!animeId || !imagen || !imagen.startsWith('data:image')) return;
-  memoryPortadaCache.set(animeId, {
-    imagen,
-    portadaVersion: typeof portadaVersion === 'number' ? portadaVersion : 1,
-  });
+  setPortadaInMemoryAndNotify(
+    animeId,
+    {
+      imagen,
+      portadaVersion: typeof portadaVersion === 'number' ? portadaVersion : 1,
+    },
+    true
+  );
 }
 
 export function deletePortadaMemoryCache(animeId: string): void {
@@ -143,16 +207,72 @@ function waitForForegroundIdle(signal?: AbortSignal): Promise<boolean> {
   });
 }
 
-async function fetchPortadasBatchFromServer(ids: string[]): Promise<Map<string, PortadaData>> {
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timerId: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timerId = setTimeout(() => {
+      reject(new Error(label));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timerId !== null) clearTimeout(timerId);
+  });
+}
+
+async function fetchSingleDocFromServerWithRetry(
+  animeId: string,
+  maxRetries: number = SINGLE_DOC_MAX_RETRIES
+): Promise<PortadaData | null> {
+  if (!db || !isFirebaseConfigured || !animeId) return null;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const srvSnap = await withTimeout(
+        getDocFromServer(doc(db, 'portadas', animeId)),
+        BATCH_SERVER_TIMEOUT_MS,
+        `getDocFromServer timeout (${animeId})`
+      );
+      if (!srvSnap.exists()) {
+        return null;
+      }
+      const data = srvSnap.data();
+      if (data && typeof data.imagen === 'string' && data.imagen.startsWith('data:image')) {
+        const portadaVersion =
+          typeof data.portadaVersion === 'number' ? data.portadaVersion : 1;
+        const entry: PortadaData = {
+          imagen: data.imagen,
+          portadaVersion,
+        };
+        setPortadaInMemoryAndNotify(animeId, entry, false);
+        return entry;
+      }
+      return null;
+    } catch {
+      if (attempt < maxRetries) {
+        await new Promise((res) => setTimeout(res, 150 * (attempt + 1)));
+      }
+    }
+  }
+
+  return null;
+}
+
+async function runChunkWithFallback(chunkIds: string[]): Promise<Map<string, PortadaData>> {
   const foundMap = new Map<string, PortadaData>();
-  if (!db || !isFirebaseConfigured || ids.length === 0) return foundMap;
+  if (!db || !isFirebaseConfigured || chunkIds.length === 0) return foundMap;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return foundMap;
 
   try {
     const q = query(
       collection(db, 'portadas'),
-      where(documentId(), 'in', ids)
+      where(documentId(), 'in', chunkIds)
     );
-    const snap = await getDocsFromServer(q);
+    const snap = await withTimeout(
+      getDocsFromServer(q),
+      BATCH_SERVER_TIMEOUT_MS,
+      'getDocsFromServer batch timeout'
+    );
 
     snap.docs.forEach((docSnap) => {
       const data = docSnap.data();
@@ -164,14 +284,82 @@ async function fetchPortadasBatchFromServer(ids: string[]): Promise<Map<string, 
           portadaVersion,
         };
         foundMap.set(docSnap.id, entry);
-        memoryPortadaCache.set(docSnap.id, entry);
+        setPortadaInMemoryAndNotify(docSnap.id, entry, false);
       }
     });
+
+    return foundMap;
   } catch {
-    // Network / offline error — handled by caller's stale-cache fallback
+    // Batch failed or timed out (>4s): retry each ID individually with getDocFromServer (up to 2 retries)
+    const CONCURRENCY = 6;
+    let cursor = 0;
+
+    const worker = async () => {
+      while (cursor < chunkIds.length) {
+        const idx = cursor++;
+        const id = chunkIds[idx];
+        const entry = await fetchSingleDocFromServerWithRetry(id, SINGLE_DOC_MAX_RETRIES);
+        if (entry) {
+          foundMap.set(id, entry);
+        }
+      }
+    };
+
+    const workerCount = Math.min(CONCURRENCY, chunkIds.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return foundMap;
+  }
+}
+
+/**
+ * Dispatches server batch fetches for `ids` in chunks of up to 30 while strictly
+ * deduplicating against `inFlightServerById`. Never cancels started requests.
+ */
+async function fetchPortadasBatchFromServer(ids: string[]): Promise<Map<string, PortadaData>> {
+  const resultMap = new Map<string, PortadaData>();
+  if (!db || !isFirebaseConfigured || ids.length === 0) return resultMap;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return resultMap;
+
+  const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
+  const perIdPromises = new Map<string, Promise<PortadaData | null>>();
+  const idsToFetch: string[] = [];
+
+  for (const id of uniqueIds) {
+    const existingFlight = inFlightServerById.get(id);
+    if (existingFlight) {
+      perIdPromises.set(id, existingFlight);
+    } else {
+      idsToFetch.push(id);
+    }
   }
 
-  return foundMap;
+  for (let i = 0; i < idsToFetch.length; i += FIRESTORE_IN_QUERY_MAX) {
+    const chunkIds = idsToFetch.slice(i, i + FIRESTORE_IN_QUERY_MAX);
+    const chunkPromise = runChunkWithFallback(chunkIds);
+
+    for (const id of chunkIds) {
+      const perIdPromise = chunkPromise
+        .then((map) => map.get(id) || memoryPortadaCache.get(id) || null)
+        .finally(() => {
+          if (inFlightServerById.get(id) === perIdPromise) {
+            inFlightServerById.delete(id);
+          }
+        });
+      inFlightServerById.set(id, perIdPromise);
+      perIdPromises.set(id, perIdPromise);
+    }
+  }
+
+  await Promise.all(
+    Array.from(perIdPromises.entries()).map(async ([id, p]) => {
+      const res = await p;
+      if (res) {
+        resultMap.set(id, res);
+      }
+    })
+  );
+
+  return resultMap;
 }
 
 async function flushVisibleQueue(): Promise<void> {
@@ -188,14 +376,9 @@ async function flushVisibleQueue(): Promise<void> {
   for (const [id, resolvers] of entries) {
     const waitingAnticipated = anticipatedQueue.get(id);
     if (waitingAnticipated) {
-      for (const w of waitingAnticipated) {
-        if (!w.signal?.aborted) {
-          resolvers.push(w.resolve);
-        } else {
-          w.resolve(null);
-        }
-      }
+      resolvers.push(...waitingAnticipated);
       anticipatedQueue.delete(id);
+      pendingAnticipatedPromises.delete(id);
     }
   }
 
@@ -212,8 +395,8 @@ async function flushVisibleQueue(): Promise<void> {
         const foundMap = await fetchPortadasBatchFromServer(ids);
 
         for (const [id, resolvers] of chunkEntries) {
-          inFlightVisible.delete(id);
-          const result = foundMap.get(id) || null;
+          pendingVisiblePromises.delete(id);
+          const result = foundMap.get(id) || memoryPortadaCache.get(id) || null;
           for (const resolve of resolvers) {
             resolve(result);
           }
@@ -230,8 +413,11 @@ async function flushVisibleQueue(): Promise<void> {
  * Tier 1 (Visible, rootMargin 300px): immediate priority, grouped over ~16ms in batches of up to 30 IDs.
  */
 function requestPortadaVisible(animeId: string): Promise<PortadaData | null> {
-  const existing = inFlightVisible.get(animeId);
-  if (existing) return existing;
+  const existingServerFlight = inFlightServerById.get(animeId);
+  if (existingServerFlight) return existingServerFlight;
+
+  const existingVisible = pendingVisiblePromises.get(animeId);
+  if (existingVisible) return existingVisible;
 
   const promise = new Promise<PortadaData | null>((resolve) => {
     const list = visibleQueue.get(animeId) || [];
@@ -245,7 +431,7 @@ function requestPortadaVisible(animeId: string): Promise<PortadaData | null> {
     }
   });
 
-  inFlightVisible.set(animeId, promise);
+  pendingVisiblePromises.set(animeId, promise);
   return promise;
 }
 
@@ -262,30 +448,25 @@ async function flushAnticipatedQueue(): Promise<void> {
     return;
   }
 
-  // Filter out cancelled waiters (cards that scrolled out of 1200px range)
-  const activeEntries: Array<[string, Set<AnticipatedWaiter>]> = [];
-  for (const [id, waiters] of anticipatedQueue.entries()) {
-    const validWaiters = new Set<AnticipatedWaiter>();
-    for (const w of waiters) {
-      if (w.signal?.aborted) {
-        w.resolve(null);
-      } else {
-        validWaiters.add(w);
-      }
-    }
-    if (validWaiters.size > 0) {
-      // If already resolved by a visible request or cache while waiting, resolve immediately
-      const memHit = memoryPortadaCache.get(id);
-      if (memHit) {
-        for (const w of validWaiters) w.resolve(memHit);
-      } else if (inFlightVisible.has(id)) {
-        const visPromise = inFlightVisible.get(id)!;
-        visPromise.then((res) => {
-          for (const w of validWaiters) w.resolve(res);
-        });
-      } else {
-        activeEntries.push([id, validWaiters]);
-      }
+  // Drain queue without discarding cards that left range — let all requested cards finish and cache in memory
+  const activeEntries: Array<[string, Array<(result: PortadaData | null) => void>]> = [];
+  for (const [id, resolvers] of anticipatedQueue.entries()) {
+    const memHit = memoryPortadaCache.get(id);
+    if (memHit) {
+      pendingAnticipatedPromises.delete(id);
+      for (const r of resolvers) r(memHit);
+    } else if (pendingVisiblePromises.has(id)) {
+      pendingVisiblePromises.get(id)!.then((res) => {
+        pendingAnticipatedPromises.delete(id);
+        for (const r of resolvers) r(res);
+      });
+    } else if (inFlightServerById.has(id)) {
+      inFlightServerById.get(id)!.then((res) => {
+        pendingAnticipatedPromises.delete(id);
+        for (const r of resolvers) r(res);
+      });
+    } else {
+      activeEntries.push([id, resolvers]);
     }
   }
   anticipatedQueue.clear();
@@ -297,7 +478,7 @@ async function flushAnticipatedQueue(): Promise<void> {
 
   activeAnticipatedBatches++;
   try {
-    const chunks: Array<Array<[string, Set<AnticipatedWaiter>]>> = [];
+    const chunks: Array<Array<[string, Array<(result: PortadaData | null) => void>]>> = [];
     for (let i = 0; i < activeEntries.length; i += FIRESTORE_IN_QUERY_MAX) {
       chunks.push(activeEntries.slice(i, i + FIRESTORE_IN_QUERY_MAX));
     }
@@ -308,42 +489,37 @@ async function flushAnticipatedQueue(): Promise<void> {
         await waitForVisibleIdle();
       }
 
-      const stillValidEntries: Array<[string, Set<AnticipatedWaiter>]> = [];
-      for (const [id, waiters] of chunkEntries) {
-        const remainingWaiters = new Set<AnticipatedWaiter>();
-        for (const w of waiters) {
-          if (w.signal?.aborted) {
-            w.resolve(null);
-          } else {
-            remainingWaiters.add(w);
-          }
-        }
-        if (remainingWaiters.size > 0) {
-          const memHit = memoryPortadaCache.get(id);
-          if (memHit) {
-            for (const w of remainingWaiters) w.resolve(memHit);
-          } else if (inFlightVisible.has(id)) {
-            inFlightVisible.get(id)!.then((res) => {
-              for (const w of remainingWaiters) w.resolve(res);
-            });
-          } else {
-            stillValidEntries.push([id, remainingWaiters]);
-          }
+      const stillNeeded: Array<[string, Array<(result: PortadaData | null) => void>]> = [];
+      for (const [id, resolvers] of chunkEntries) {
+        const memHit = memoryPortadaCache.get(id);
+        if (memHit) {
+          pendingAnticipatedPromises.delete(id);
+          for (const r of resolvers) r(memHit);
+        } else if (pendingVisiblePromises.has(id)) {
+          pendingVisiblePromises.get(id)!.then((res) => {
+            pendingAnticipatedPromises.delete(id);
+            for (const r of resolvers) r(res);
+          });
+        } else if (inFlightServerById.has(id)) {
+          inFlightServerById.get(id)!.then((res) => {
+            pendingAnticipatedPromises.delete(id);
+            for (const r of resolvers) r(res);
+          });
         } else {
-          inFlightAnticipated.delete(id);
+          stillNeeded.push([id, resolvers]);
         }
       }
 
-      if (stillValidEntries.length === 0) continue;
+      if (stillNeeded.length === 0) continue;
 
-      const ids = stillValidEntries.map(([id]) => id);
+      const ids = stillNeeded.map(([id]) => id);
       const foundMap = await fetchPortadasBatchFromServer(ids);
 
-      for (const [id, waiters] of stillValidEntries) {
-        inFlightAnticipated.delete(id);
-        const result = foundMap.get(id) || null;
-        for (const w of waiters) {
-          w.resolve(result);
+      for (const [id, resolvers] of stillNeeded) {
+        pendingAnticipatedPromises.delete(id);
+        const result = foundMap.get(id) || memoryPortadaCache.get(id) || null;
+        for (const r of resolvers) {
+          r(result);
         }
       }
     }
@@ -354,42 +530,23 @@ async function flushAnticipatedQueue(): Promise<void> {
 }
 
 /**
- * Tier 2 (Anticipated, rootMargin 1200px): runs only when visible queue is idle,
- * and drops entries whose AbortSignal aborted because the card left 1200px during fast scroll.
+ * Tier 2 (Anticipated, rootMargin 1500px): runs only when visible queue is idle.
+ * Never cancelled when cards scroll out of range; reuses any existing in-flight request.
  */
-function requestPortadaAnticipated(
-  animeId: string,
-  signal?: AbortSignal
-): Promise<PortadaData | null> {
-  if (signal?.aborted) return Promise.resolve(null);
-  if (inFlightVisible.has(animeId)) {
-    return inFlightVisible.get(animeId)!;
-  }
+function requestPortadaAnticipated(animeId: string): Promise<PortadaData | null> {
+  const existingServerFlight = inFlightServerById.get(animeId);
+  if (existingServerFlight) return existingServerFlight;
 
-  const existing = inFlightAnticipated.get(animeId);
-  if (existing && !signal) return existing;
+  const existingVisible = pendingVisiblePromises.get(animeId);
+  if (existingVisible) return existingVisible;
+
+  const existingAnticipated = pendingAnticipatedPromises.get(animeId);
+  if (existingAnticipated) return existingAnticipated;
 
   const promise = new Promise<PortadaData | null>((resolve) => {
-    const waiter: AnticipatedWaiter = { resolve, signal };
-    const set = anticipatedQueue.get(animeId) || new Set<AnticipatedWaiter>();
-    set.add(waiter);
-    anticipatedQueue.set(animeId, set);
-
-    if (signal) {
-      const onAbort = () => {
-        const currentSet = anticipatedQueue.get(animeId);
-        if (currentSet && currentSet.has(waiter)) {
-          currentSet.delete(waiter);
-          if (currentSet.size === 0) {
-            anticipatedQueue.delete(animeId);
-            inFlightAnticipated.delete(animeId);
-          }
-          resolve(null);
-          notifyQueueIdleState();
-        }
-      };
-      signal.addEventListener('abort', onAbort, { once: true });
-    }
+    const list = anticipatedQueue.get(animeId) || [];
+    list.push(resolve);
+    anticipatedQueue.set(animeId, list);
 
     if (!anticipatedBatchTimer) {
       anticipatedBatchTimer = setTimeout(() => {
@@ -398,16 +555,51 @@ function requestPortadaAnticipated(
     }
   });
 
-  if (!inFlightAnticipated.has(animeId)) {
-    inFlightAnticipated.set(animeId, promise);
-  }
+  pendingAnticipatedPromises.set(animeId, promise);
   return promise;
 }
 
 /**
+ * Reads Firestore local persistent cache (`getDocFromCache`) for a single anime ID.
+ * If valid version match, stores in session memory Map and notifies subscribers.
+ */
+async function readPortadaFromFirestoreCache(
+  animeId: string,
+  hasExplicitVersion: boolean,
+  expectedVersion: number
+): Promise<{ hit: PortadaData | null; stale: PortadaData | null }> {
+  if (!db || !isFirebaseConfigured || !animeId) return { hit: null, stale: null };
+
+  try {
+    const cacheSnap = await getDocFromCache(doc(db, 'portadas', animeId));
+    if (cacheSnap.exists()) {
+      const data = cacheSnap.data();
+      if (data && typeof data.imagen === 'string' && data.imagen.startsWith('data:image')) {
+        const cachedVersion =
+          typeof data.portadaVersion === 'number' ? data.portadaVersion : 1;
+        const cachedEntry: PortadaData = {
+          imagen: data.imagen,
+          portadaVersion: cachedVersion,
+        };
+        if (!hasExplicitVersion || cachedVersion === expectedVersion) {
+          setPortadaInMemoryAndNotify(animeId, cachedEntry, true);
+          return { hit: cachedEntry, stale: null };
+        }
+        return { hit: null, stale: cachedEntry };
+      }
+    }
+  } catch {
+    // Document not yet in Firestore persistent cache
+  }
+
+  return { hit: null, stale: null };
+}
+
+/**
  * Cache-first base64 cover resolution for catalog/cards/detail:
- * a) Memory Map (session hits) & Firestore persistent cache (`getDocFromCache`) matching `portadaVersion` -> `fromCache: true` (instant display, no fade).
+ * a) Memory Map (session hits) & Firestore persistent cache (`getDocFromCache`) matching `portadaVersion` -> `fromCache: true`.
  * b) If missing in cache or version mismatch -> two-tier server fetch (`visible` 16ms priority OR `anticipated` when visible is idle) -> `fromCache: false`.
+ *    If `navigator.connection?.saveData` is true, anticipated server fetch is skipped (only visible loads).
  * c) If offline or server fails and a cached copy exists -> returns cached copy (`fromCache: true`) even with mismatched version.
  * Always uses the original image without resizing or recompression.
  */
@@ -415,11 +607,10 @@ export async function resolveAnimeCoverBase64(
   anime: Partial<Anime>,
   options: {
     priority?: 'visible' | 'anticipated';
-    signal?: AbortSignal;
     cacheOnly?: boolean;
   } = {}
 ): Promise<ResolvedPortadaResult | null> {
-  const { priority = 'visible', signal, cacheOnly = false } = options;
+  const { priority = 'visible', cacheOnly = false } = options;
   const animeId = anime.id ? String(anime.id) : '';
   const hasExplicitVersion = typeof anime.portadaVersion === 'number';
   const expectedVersion = hasExplicitVersion ? (anime.portadaVersion as number) : 1;
@@ -447,30 +638,21 @@ export async function resolveAnimeCoverBase64(
   }
 
   // a) Try Firestore local persistent cache first (instant display if hit)
-  let staleCached: PortadaData | null = null;
-  try {
-    const cacheSnap = await getDocFromCache(doc(db, 'portadas', animeId));
-    if (cacheSnap.exists()) {
-      const data = cacheSnap.data();
-      if (data && typeof data.imagen === 'string' && data.imagen.startsWith('data:image')) {
-        const cachedVersion =
-          typeof data.portadaVersion === 'number' ? data.portadaVersion : 1;
-        const cachedEntry: PortadaData = {
-          imagen: data.imagen,
-          portadaVersion: cachedVersion,
-        };
-        if (!hasExplicitVersion || cachedVersion === expectedVersion) {
-          memoryPortadaCache.set(animeId, cachedEntry);
-          return { imagen: cachedEntry.imagen, fromCache: true };
-        }
-        staleCached = cachedEntry;
-      }
-    }
-  } catch {
-    // Document not yet in Firestore persistent cache
+  const { hit: cacheHit, stale: staleCached } = await readPortadaFromFirestoreCache(
+    animeId,
+    hasExplicitVersion,
+    expectedVersion
+  );
+  if (cacheHit) {
+    return { imagen: cacheHit.imagen, fromCache: true };
   }
 
-  if (cacheOnly || signal?.aborted) {
+  if (cacheOnly) {
+    return null;
+  }
+
+  // Save-Data check: skip non-visible (anticipated) server downloads when mobile data saver is active
+  if (priority === 'anticipated' && isSaveDataEnabled()) {
     return null;
   }
 
@@ -484,11 +666,7 @@ export async function resolveAnimeCoverBase64(
   const serverResult =
     priority === 'visible'
       ? await requestPortadaVisible(animeId)
-      : await requestPortadaAnticipated(animeId, signal);
-
-  if (signal?.aborted && priority === 'anticipated') {
-    return null;
-  }
+      : await requestPortadaAnticipated(animeId);
 
   if (serverResult?.imagen) {
     return { imagen: serverResult.imagen, fromCache: false };
@@ -497,6 +675,85 @@ export async function resolveAnimeCoverBase64(
   // c) If server failed/returned nothing (e.g. offline/network hiccup), fall back to cached copy
   const fallbackImg = staleCached?.imagen || memHit?.imagen;
   return fallbackImg ? { imagen: fallbackImg, fromCache: true } : null;
+}
+
+/**
+ * Cache-first batch loader for Home startup, Similar Titles, and Studio/Genre immediate catalogs:
+ * 1) Reads `getDocFromCache` in parallel for all non-HTTP candidates and stores valid hits in `memoryPortadaCache`.
+ * 2) Fetches any missing IDs from server in batches of 30 (`getDocsFromServer`, with 4s timeout + single-doc retry).
+ * 3) Optionally caps waiting time via `maxWaitMs` (without cancelling the background completion).
+ */
+export async function preloadPortadasBatch(
+  animes: Partial<Anime>[],
+  options: { maxWaitMs?: number } = {}
+): Promise<void> {
+  if (!db || !isFirebaseConfigured || !animes || animes.length === 0) return;
+
+  const work = (async () => {
+    const uniqueById = new Map<string, Partial<Anime>>();
+    for (const anime of animes) {
+      const id = anime?.id ? String(anime.id) : '';
+      if (!id || uniqueById.has(id)) continue;
+      if (isExternalHttpCover(anime)) continue;
+
+      const hasExplicitVersion = typeof anime.portadaVersion === 'number';
+      const expectedVersion = hasExplicitVersion ? (anime.portadaVersion as number) : 1;
+
+      if (anime.coverData && anime.coverData.startsWith('data:image')) {
+        upsertPortadaMemoryCache(id, anime.coverData, expectedVersion);
+        continue;
+      }
+      if (anime.image && anime.image.startsWith('data:image')) {
+        upsertPortadaMemoryCache(id, anime.image, expectedVersion);
+        continue;
+      }
+
+      const memHit = memoryPortadaCache.get(id);
+      if (memHit && (!hasExplicitVersion || memHit.portadaVersion === expectedVersion)) {
+        continue;
+      }
+
+      uniqueById.set(id, anime);
+    }
+
+    if (uniqueById.size === 0) return;
+
+    const missingIds: string[] = [];
+    const staleById = new Map<string, PortadaData>();
+
+    await Promise.all(
+      Array.from(uniqueById.entries()).map(async ([id, anime]) => {
+        const hasExplicitVersion = typeof anime.portadaVersion === 'number';
+        const expectedVersion = hasExplicitVersion ? (anime.portadaVersion as number) : 1;
+        const { hit, stale } = await readPortadaFromFirestoreCache(
+          id,
+          hasExplicitVersion,
+          expectedVersion
+        );
+        if (!hit) {
+          if (stale) staleById.set(id, stale);
+          missingIds.push(id);
+        }
+      })
+    );
+
+    if (missingIds.length === 0) return;
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      staleById.forEach((entry, id) => {
+        setPortadaInMemoryAndNotify(id, entry, true);
+      });
+      return;
+    }
+
+    await fetchPortadasBatchFromServer(missingIds);
+  })();
+
+  if (options.maxWaitMs && options.maxWaitMs > 0) {
+    await withTimeout(work, options.maxWaitMs, 'preloadPortadasBatch wait cap').catch(() => {});
+  } else {
+    await work.catch(() => {});
+  }
 }
 
 /**
@@ -518,57 +775,30 @@ export async function fetchPortadaFromFirestore(
     return memHit || null;
   }
 
+  const existingServerFlight = inFlightServerById.get(animeId);
+  if (existingServerFlight) {
+    const res = await existingServerFlight;
+    if (res) return res;
+  }
+
   const flightKey = `${animeId}:${expectedVersion ?? 'any'}`;
   const existing = inFlightDirectRequests.get(flightKey);
   if (existing) return existing;
 
   const promise = (async (): Promise<PortadaData | null> => {
-    let staleCached: PortadaData | null = null;
-
-    try {
-      const cacheSnap = await getDocFromCache(doc(db, 'portadas', animeId));
-      if (cacheSnap.exists()) {
-        const data = cacheSnap.data();
-        if (data && typeof data.imagen === 'string' && data.imagen.startsWith('data:image')) {
-          const cachedVersion =
-            typeof data.portadaVersion === 'number' ? data.portadaVersion : 1;
-          const cachedEntry: PortadaData = {
-            imagen: data.imagen,
-            portadaVersion: cachedVersion,
-          };
-          if (!hasExplicitVersion || cachedVersion === expectedVersion) {
-            memoryPortadaCache.set(animeId, cachedEntry);
-            return cachedEntry;
-          }
-          staleCached = cachedEntry;
-        }
-      }
-    } catch {
-      // Cache miss
-    }
+    const { hit, stale: staleCached } = await readPortadaFromFirestoreCache(
+      animeId,
+      hasExplicitVersion,
+      hasExplicitVersion ? (expectedVersion as number) : 1
+    );
+    if (hit) return hit;
 
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       return staleCached || memHit || null;
     }
 
-    try {
-      const srvSnap = await getDocFromServer(doc(db, 'portadas', animeId));
-      if (srvSnap.exists()) {
-        const data = srvSnap.data();
-        if (data && typeof data.imagen === 'string' && data.imagen.startsWith('data:image')) {
-          const srvVersion =
-            typeof data.portadaVersion === 'number' ? data.portadaVersion : 1;
-          const entry: PortadaData = {
-            imagen: data.imagen,
-            portadaVersion: srvVersion,
-          };
-          memoryPortadaCache.set(animeId, entry);
-          return entry;
-        }
-      }
-    } catch {
-      // Server unavailable
-    }
+    const entry = await fetchSingleDocFromServerWithRetry(animeId, SINGLE_DOC_MAX_RETRIES);
+    if (entry) return entry;
 
     return staleCached || memHit || null;
   })().finally(() => {
@@ -627,20 +857,56 @@ function waitForBrowserIdle(signal: AbortSignal): Promise<boolean> {
 }
 
 /**
- * Softer background idle preloader for catalog cards:
- * - Waits until there are NO active visible or anticipated requests
- * - Waits for browser idle (`requestIdleCallback` with `setTimeout` fallback)
- * - Collects up to 12 uncached base64 covers and requests 1 batch at a time
- * - Cancels immediately via `AbortSignal` when user leaves the catalog
+ * Background idle preloader for remaining Studio/Genre items beyond the initial 60.
+ * Loads in batches of 30 when the browser is idle. Disabled when Save-Data is active.
+ */
+export async function preloadPortadasIdleChunks(
+  animes: Partial<Anime>[],
+  signal: AbortSignal,
+  chunkSize: number = FIRESTORE_IN_QUERY_MAX
+): Promise<void> {
+  if (!db || !isFirebaseConfigured || animes.length === 0) return;
+  if (isSaveDataEnabled()) return;
+
+  let offset = 0;
+  while (offset < animes.length && !signal.aborted) {
+    const fgReady = await waitForForegroundIdle(signal);
+    if (!fgReady || signal.aborted) return;
+
+    const idleReady = await waitForBrowserIdle(signal);
+    if (!idleReady || signal.aborted) return;
+
+    if (isSaveDataEnabled()) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    if (hasActiveForegroundRequests()) continue;
+
+    const slice = animes.slice(offset, offset + chunkSize);
+    offset += chunkSize;
+    await preloadPortadasBatch(slice);
+  }
+}
+
+/**
+ * Softer background idle preloader for general catalog cards:
+ * - Disabled when `navigator.connection?.saveData` is true.
+ * - Waits until there are NO active visible or anticipated foreground requests.
+ * - Waits for browser idle (`requestIdleCallback` with `setTimeout` fallback).
+ * - Preloads at most the next 24 uncached covers total, in batches of 12 (strictly 1 batch at a time).
+ * - Stops queueing new batches via `AbortSignal` when user leaves the catalog.
  */
 export async function startCatalogIdlePreload(
   catalogAnimes: Partial<Anime>[],
   signal: AbortSignal
 ): Promise<void> {
   if (!db || !isFirebaseConfigured || catalogAnimes.length === 0) return;
+  if (isSaveDataEnabled()) return;
   if (isPreloadBatchRunning) return;
 
-  while (!signal.aborted) {
+  let totalPreloadedInPass = 0;
+
+  while (!signal.aborted && totalPreloadedInPass < PRELOAD_TOTAL_LIMIT) {
+    if (isSaveDataEnabled()) return;
+
     // 1. Wait for all visible & anticipated foreground requests to finish
     const fgReady = await waitForForegroundIdle(signal);
     if (!fgReady || signal.aborted) return;
@@ -649,21 +915,19 @@ export async function startCatalogIdlePreload(
     const canProceed = await waitForBrowserIdle(signal);
     if (!canProceed || signal.aborted) return;
 
-    // Re-check foreground idle after waking up from idle callback
-    if (hasActiveForegroundRequests()) {
-      continue;
-    }
-
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-      return;
-    }
-
+    if (isSaveDataEnabled()) return;
+    if (hasActiveForegroundRequests()) continue;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     if (isPreloadBatchRunning) return;
+
+    const remainingQuota = PRELOAD_TOTAL_LIMIT - totalPreloadedInPass;
+    const batchTarget = Math.min(PRELOAD_BATCH_LIMIT, remainingQuota);
+    if (batchTarget <= 0) return;
 
     const uncachedIds: string[] = [];
     const seenIds = new Set<string>();
 
-    for (let i = 0; i < catalogAnimes.length && uncachedIds.length < PRELOAD_BATCH_LIMIT; i += 8) {
+    for (let i = 0; i < catalogAnimes.length && uncachedIds.length < batchTarget; i += 8) {
       if (signal.aborted || hasActiveForegroundRequests()) break;
       const slice = catalogAnimes.slice(i, i + 8);
 
@@ -682,7 +946,11 @@ export async function startCatalogIdlePreload(
             return null;
           }
 
-          if (inFlightVisible.has(id) || inFlightAnticipated.has(id)) {
+          if (
+            inFlightServerById.has(id) ||
+            pendingVisiblePromises.has(id) ||
+            pendingAnticipatedPromises.has(id)
+          ) {
             return null;
           }
 
@@ -694,24 +962,13 @@ export async function startCatalogIdlePreload(
             return null;
           }
 
-          try {
-            const cacheSnap = await getDocFromCache(doc(db, 'portadas', id));
-            if (cacheSnap.exists()) {
-              const data = cacheSnap.data();
-              if (data && typeof data.imagen === 'string' && data.imagen.startsWith('data:image')) {
-                const cachedVersion =
-                  typeof data.portadaVersion === 'number' ? data.portadaVersion : 1;
-                if (!hasExplicitVersion || cachedVersion === expectedVersion) {
-                  memoryPortadaCache.set(id, {
-                    imagen: data.imagen,
-                    portadaVersion: cachedVersion,
-                  });
-                  return null;
-                }
-              }
-            }
-          } catch {
-            // Candidate for preload
+          const { hit } = await readPortadaFromFirestoreCache(
+            id,
+            hasExplicitVersion,
+            expectedVersion
+          );
+          if (hit) {
+            return null;
           }
 
           return id;
@@ -719,7 +976,7 @@ export async function startCatalogIdlePreload(
       );
 
       for (const id of batchCheck) {
-        if (id && uncachedIds.length < PRELOAD_BATCH_LIMIT) {
+        if (id && uncachedIds.length < batchTarget) {
           uncachedIds.push(id);
         }
       }
@@ -733,6 +990,7 @@ export async function startCatalogIdlePreload(
     isPreloadBatchRunning = true;
     try {
       await fetchPortadasBatchFromServer(uncachedIds);
+      totalPreloadedInPass += uncachedIds.length;
     } catch {
       return;
     } finally {

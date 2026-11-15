@@ -8,7 +8,8 @@ import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { Anime, Studio, Genre, normalizeAnimeYear, resolveContinuationGroup, formatContinuationTitle } from '../types';
 import { ArrowLeft, Download, Plus, Check, Play, Pause, Volume2, VolumeX, X, Film, ExternalLink, Tv, Video, Maximize2, Minimize2, RotateCcw, RotateCw, FastForward, Maximize, Loader2, Sparkles, Eye, EyeOff, Star, Info } from 'lucide-react';
-import { getFallbackSvg, SmartAnimeCover, preloadAnimeCover, prefetchAnime } from '../utils/imageFallback';
+import { getFallbackSvg, SmartAnimeCover, prefetchAnime } from '../utils/imageFallback';
+import { resolveAnimeCoverBase64, preloadPortadasBatch, isExternalHttpCover } from '../lib/coverCache';
 import GlobalComments from './GlobalComments';
 import AnimeRatingModal from './AnimeRatingModal';
 import { getAnimeRatingStats, submitAnimeVote, RatingStats } from '../utils/ratingManager';
@@ -112,10 +113,8 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
     return resolveContinuationGroup(anime, availableAnimes);
   }, [anime, availableAnimes, showDeferredSections]);
 
-  // Calculate 3 recommended animes based on affinity (genres, studio, episodes, ratings)
-  // Evaluated smoothly when deferred sections wake up
+  // Calculate 3 recommended animes immediately (without waiting for deferred UI) so their covers start loading right away
   const recommendedAnimes = useMemo(() => {
-    if (!showDeferredSections) return [];
     const list = availableAnimes.filter(a => a.id !== anime.id);
     if (list.length === 0) return [];
 
@@ -191,24 +190,24 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
 
     // Tomar 3 animes distintos
     return shuffled.slice(0, 3);
-  }, [anime.id, availableAnimes, visitSeed, showDeferredSections]);
+  }, [anime.id, availableAnimes, visitSeed]);
 
-  // Warm content smoothly after entrance animation finishes
+  // Immediate cover priority: 1) Main anime cover first, 2) "Títulos similares" in a single batch (no waiting for scroll)
   useEffect(() => {
-    // 1. Preload anime poster & backdrop
-    preloadAnimeCover(anime, studio?.name);
+    let cancelled = false;
 
-    const timer = setTimeout(() => {
-      // 2. Preload recommended animes
+    const loadDetailAndSimilarCovers = async () => {
+      if (!isExternalHttpCover(anime)) {
+        await resolveAnimeCoverBase64(anime, { priority: 'visible' }).catch(() => null);
+      }
+      if (cancelled) return;
+
       if (recommendedAnimes.length > 0) {
-        recommendedAnimes.forEach(rec => {
-          const sIds = (rec.studioIds && rec.studioIds.length > 0) ? rec.studioIds : (rec.studioId ? [rec.studioId] : []);
-          const recStudio = studios.find(s => sIds.includes(s.id))?.name || 'Estudio';
-          preloadAnimeCover(rec, recStudio);
-        });
+        await preloadPortadasBatch(recommendedAnimes).catch(() => {});
       }
 
-      // 3. Preload episode thumbnails
+      if (cancelled) return;
+
       if (anime.episodes && anime.episodes.length > 0) {
         anime.episodes.slice(0, 10).forEach(ep => {
           const epCover = ep.thumbnail || ep.coverImage;
@@ -219,10 +218,14 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
           }
         });
       }
-    }, 280);
+    };
 
-    return () => clearTimeout(timer);
-  }, [anime.id, anime.episodes, studio?.name, recommendedAnimes, studios]);
+    loadDetailAndSimilarCovers();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [anime.id, anime.episodes, recommendedAnimes]);
 
   // Video Player Modal State
   const [activeEpisodeNum, setActiveEpisodeNum] = useState<number | null>(initialEpisodeNum || null);
