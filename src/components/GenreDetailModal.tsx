@@ -16,7 +16,7 @@ import {
   ArrowUpDown 
 } from 'lucide-react';
 import { getAnimeRatingStats } from '../utils/ratingManager';
-import { getFallbackSvg, preloadAllAnimes, portadaUrl } from '../utils/imageFallback';
+import { getFallbackSvg, preloadAllAnimes, portadaUrl, SmartAnimeCover } from '../utils/imageFallback';
 import GalleryCard from './GalleryCard';
 
 export type GenreSortType = 'name-asc' | 'name-desc' | 'rating-desc' | 'rating-asc' | 'date-desc' | 'date-asc';
@@ -120,8 +120,8 @@ export default function GenreDetailModal({
     };
   }, [genreAnimes]);
 
-  // Genre cover image: genre.image or first anime cover fallback
-  const genreCover = genre.image || genreAnimes[0]?.coverData || genreAnimes[0]?.image;
+  // Genre fallback anime when genre.image is absent
+  const firstGenreAnime = genreAnimes[0] || null;
 
   // Sort genre animes based on user selection
   const sortedGenreAnimes = useMemo(() => {
@@ -329,9 +329,9 @@ export default function GenreDetailModal({
         <div className="flex flex-row items-center sm:items-start gap-4 sm:gap-7 relative z-10 pt-2 px-2.5 sm:px-0">
           {/* Portada del género REDONDA */}
           <div className="w-28 h-28 xs:w-32 xs:h-32 sm:w-44 sm:h-44 md:w-52 md:h-52 rounded-full overflow-hidden shadow-2xl shrink-0 flex items-center justify-center relative select-none bg-purple-950/20">
-            {genreCover ? (
+            {genre.image ? (
               <img
-                src={portadaUrl(genreCover, 'estudio')}
+                src={portadaUrl(genre.image, 'estudio')}
                 alt={genre.name}
                 loading="lazy"
                 decoding="async"
@@ -341,6 +341,17 @@ export default function GenreDetailModal({
                 onError={(e) => {
                   e.currentTarget.src = getFallbackSvg(genre.name);
                 }}
+              />
+            ) : firstGenreAnime ? (
+              <SmartAnimeCover
+                anime={firstGenreAnime}
+                alt={genre.name}
+                tamaño="estudio"
+                priority={true}
+                loading="eager"
+                width={270}
+                height={270}
+                className="w-full h-full object-cover rounded-full drop-shadow-[0_10px_25px_rgba(0,0,0,0.6)] transition-transform duration-300 hover:scale-105"
               />
             ) : (
               <div className="w-full h-full flex flex-col items-center justify-center text-center p-3 rounded-full bg-purple-950/20">

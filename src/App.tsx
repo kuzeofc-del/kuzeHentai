@@ -82,7 +82,7 @@ const computeCatalogSignature = (list: Anime[]): string => {
       const epsSig = (a.episodes || [])
         .map((e) => `${e.number}:${Boolean(e.isNew)}:${e.addedToRecentAt || ''}:${e.mp4Url || ''}:${fingerprintMediaString(e.thumbnail || e.coverImage)}`)
         .join(',');
-      return `${a.id}|${a.name}|${a.status || ''}|${a.releaseMonth || ''}|${a.year || ''}|${Boolean(a.hidden)}|${a.downloads || 0}|${a.updatedAt || ''}|${a.continuationType || ''}|${(a.continuationAnimeIds || []).join(',')}|${fingerprintMediaString(a.coverData)}|${fingerprintMediaString(a.image)}|${(a.genreIds || []).join(',')}|${(a.studioIds || []).join(',')}|${epsSig}`;
+      return `${a.id}|${a.name}|${a.status || ''}|${a.releaseMonth || ''}|${a.year || ''}|${Boolean(a.hidden)}|${a.downloads || 0}|${a.updatedAt || ''}|${a.portadaVersion ?? ''}|${a.continuationType || ''}|${(a.continuationAnimeIds || []).join(',')}|${fingerprintMediaString(a.coverData)}|${fingerprintMediaString(a.image)}|${(a.genreIds || []).join(',')}|${(a.studioIds || []).join(',')}|${epsSig}`;
     })
     .join(';;');
 };
@@ -1716,13 +1716,12 @@ export default function App() {
           ? new Date(ep.addedToRecentAt).getTime()
           : (baseTime + epNum * 1000);
         const ownThumb = ep.thumbnail || ep.coverImage;
-        const fallbackCover = anime.coverData || anime.image;
         items.push({
           id: `${anime.id}-ep-${epNum}`,
           anime,
           episodeNumber: epNum,
           episodeTitle: ep.title || ep.name,
-          coverImage: ownThumb || (fallbackCover ? portadaUrl(fallbackCover, 'episodio') : undefined),
+          coverImage: ownThumb || undefined,
           timestamp: epTimestamp,
         });
       });
@@ -2743,9 +2742,15 @@ export default function App() {
                           }}
                         />
                       ) : (
-                        <div className="w-full h-full bg-[#150a24] flex items-center justify-center">
-                          <Film className="h-6 w-6 text-purple-400/40" />
-                        </div>
+                        <SmartAnimeCover
+                          anime={item.anime}
+                          alt={`${item.anime.name} - Ep ${item.episodeNumber}`}
+                          tamaño="episodio"
+                          loading="lazy"
+                          width={500}
+                          height={281}
+                          className="w-full h-full object-cover"
+                        />
                       )}
                       <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/20 pointer-events-none" />
                       <div className="absolute top-1.5 left-1.5 h-4.5 min-w-[34px] px-1.5 rounded-full bg-black/80 backdrop-blur-md flex items-center justify-center border border-white/10 shadow-sm z-10">

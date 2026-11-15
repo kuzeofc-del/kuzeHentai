@@ -7,13 +7,65 @@ import React, { useMemo } from 'react';
 import { Studio, Anime } from '../types';
 import HorizontalSectionRow from './HorizontalSectionRow';
 import { Building2 } from 'lucide-react';
-import { getFallbackSvg, portadaUrl, prefetchAnime } from '../utils/imageFallback';
+import { getFallbackSvg, portadaUrl, prefetchAnime, SmartAnimeCover, useInView200 } from '../utils/imageFallback';
 import { getAnimeRatingStats } from '../utils/ratingManager';
 
 interface DailyStudiosSectionProps {
   studios: Studio[];
   animes: Anime[];
   onSelectStudio: (studio: Studio) => void;
+}
+
+function StudioImageCircle({ studio, firstAnime }: { studio: Studio; firstAnime: Anime | null }) {
+  const { ref, isInView } = useInView200(false);
+  const [loaded, setLoaded] = React.useState(false);
+
+  if (!studio.image && firstAnime) {
+    return (
+      <SmartAnimeCover
+        anime={firstAnime}
+        studioName={studio.name}
+        alt={studio.name}
+        tamaño="estudio"
+        loading="lazy"
+        width={270}
+        height={270}
+        className="w-full h-full object-cover rounded-full drop-shadow-[0_4px_12px_rgba(0,0,0,0.6)] transition-transform duration-300 group-hover:scale-110"
+      />
+    );
+  }
+
+  if (studio.image) {
+    return (
+      <div ref={ref} className="w-full h-full relative rounded-full overflow-hidden bg-neutral-800">
+        {!loaded && <div className="absolute inset-0 bg-neutral-800 pointer-events-none" />}
+        {isInView && (
+          <img
+            src={portadaUrl(studio.image, 'estudio')}
+            alt={studio.name}
+            loading="lazy"
+            decoding="async"
+            width={270}
+            height={270}
+            onLoad={() => setLoaded(true)}
+            className={`w-full h-full object-cover rounded-full drop-shadow-[0_4px_12px_rgba(0,0,0,0.6)] transition-all duration-300 group-hover:scale-110 ${
+              loaded ? 'opacity-100' : 'opacity-0'
+            }`}
+            onError={(e) => {
+              e.currentTarget.src = getFallbackSvg(studio.name);
+              setLoaded(true);
+            }}
+          />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-full h-full flex items-center justify-center rounded-full bg-purple-950/40 text-purple-300">
+      <Building2 className="w-7 h-7 sm:w-8 sm:h-8 opacity-70" />
+    </div>
+  );
 }
 
 export default function DailyStudiosSection({
@@ -41,8 +93,6 @@ export default function DailyStudiosSection({
           return sIds.includes(studio.id);
         });
 
-        const cover = studio.image || studioAnimes[0]?.coverData || studioAnimes[0]?.image;
-
         let totalDownloads = 0;
         let totalVotes = 0;
         for (let i = 0; i < studioAnimes.length; i++) {
@@ -55,7 +105,6 @@ export default function DailyStudiosSection({
 
         return {
           studio,
-          cover,
           firstAnime: studioAnimes[0] || null,
           animeCount: studioAnimes.length,
           popularityScore,
@@ -82,7 +131,7 @@ export default function DailyStudiosSection({
       title="Studios"
       icon={<Building2 className="w-4 h-4 text-purple-400" />}
     >
-      {studioItems.map(({ studio, cover, firstAnime }) => (
+      {studioItems.map(({ studio, firstAnime }) => (
         <div
           key={`studio-circle-${studio.id}`}
           className="flex flex-col items-center shrink-0 cursor-pointer group select-none active:scale-95 transition-all w-[89px] xs:w-[99px] sm:w-[109px]"
@@ -94,24 +143,7 @@ export default function DailyStudiosSection({
         >
           {/* Portada circular del estudio, limpia sin líneas de color alrededor */}
           <div className="w-[88px] h-[88px] xs:w-[98px] xs:h-[98px] sm:w-[108px] sm:h-[108px] rounded-full overflow-hidden shadow-lg shadow-black/70 shrink-0 flex items-center justify-center relative bg-purple-950/30 transition-all duration-300">
-            {cover ? (
-              <img
-                src={portadaUrl(cover, 'estudio')}
-                alt={studio.name}
-                loading="lazy"
-                decoding="async"
-                width={270}
-                height={270}
-                className="w-full h-full object-cover rounded-full drop-shadow-[0_4px_12px_rgba(0,0,0,0.6)] transition-transform duration-300 group-hover:scale-110"
-                onError={(e) => {
-                  e.currentTarget.src = getFallbackSvg(studio.name);
-                }}
-              />
-            ) : (
-              <div className="w-full h-full flex items-center justify-center rounded-full bg-purple-950/40 text-purple-300">
-                <Building2 className="w-7 h-7 sm:w-8 sm:h-8 opacity-70" />
-              </div>
-            )}
+            <StudioImageCircle studio={studio} firstAnime={firstAnime} />
           </div>
 
           {/* Únicamente el nombre del estudio debajo, sin información redundante */}

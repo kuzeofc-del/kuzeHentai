@@ -8,7 +8,7 @@ import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { Anime, Studio, Genre, normalizeAnimeYear, resolveContinuationGroup, formatContinuationTitle } from '../types';
 import { ArrowLeft, Download, Plus, Check, Play, Pause, Volume2, VolumeX, X, Film, ExternalLink, Tv, Video, Maximize2, Minimize2, RotateCcw, RotateCw, FastForward, Maximize, Loader2, Sparkles, Eye, EyeOff, Star, Info } from 'lucide-react';
-import { getFallbackSvg, processImageSrc, portadaUrl, globalImageCache, globalLoadedAnimeIds, SmartAnimeCover, preloadAnimeCover, prefetchAnime } from '../utils/imageFallback';
+import { getFallbackSvg, SmartAnimeCover, preloadAnimeCover, prefetchAnime } from '../utils/imageFallback';
 import GlobalComments from './GlobalComments';
 import AnimeRatingModal from './AnimeRatingModal';
 import { getAnimeRatingStats, submitAnimeVote, RatingStats } from '../utils/ratingManager';
@@ -485,73 +485,6 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
     };
   }, [isPlayerOpen]);
 
-  // Robust image fallback state matching GalleryCard
-  const initialSrc = processImageSrc(anime, studio?.name);
-  const [imageSrc, setImageSrc] = useState<string>(initialSrc);
-  const [retryCount, setRetryCount] = useState<number>(0);
-  const initialInstant = Boolean(
-    initialSrc.startsWith('data:') || 
-    globalImageCache.has(initialSrc) || 
-    (anime.id && globalLoadedAnimeIds.has(anime.id))
-  );
-  const [isLoaded, setIsLoaded] = useState<boolean>(initialInstant);
-  const posterImgRef = useRef<HTMLImageElement>(null);
-
-  useEffect(() => {
-    const src = processImageSrc(anime, studio?.name);
-    setImageSrc(prev => {
-      if (src !== prev) {
-        setRetryCount(0);
-        const instant = src.startsWith('data:') || globalImageCache.has(src) || (anime.id && globalLoadedAnimeIds.has(anime.id));
-        setIsLoaded(Boolean(instant));
-        return src;
-      }
-      return prev;
-    });
-  }, [anime.image, anime.coverData, anime.id, studio?.name]);
-
-  // Instantly verify if image is complete in browser cache or when player closes
-  useEffect(() => {
-    if (posterImgRef.current && posterImgRef.current.complete && posterImgRef.current.naturalWidth > 0) {
-      setIsLoaded(true);
-    }
-  }, [imageSrc, isPlayerOpen]);
-
-  const handleLoad = () => {
-    if (imageSrc) globalImageCache.add(imageSrc);
-    setIsLoaded(true);
-  };
-
-  const handleError = () => {
-    if (retryCount === 0) {
-      setRetryCount(1);
-      if (anime.coverData && anime.coverData.startsWith('data:image/') && imageSrc !== anime.coverData) {
-        setImageSrc(anime.coverData);
-        setIsLoaded(true);
-        return;
-      }
-      if (anime.id) {
-        const nextSrc = `/covers/${anime.id}.webp`;
-        setImageSrc(nextSrc);
-        if (globalImageCache.has(nextSrc)) setIsLoaded(true);
-        return;
-      }
-    }
-
-    if (retryCount === 1) {
-      setRetryCount(2);
-      if (anime.id) {
-        setImageSrc(`/api/covers/${anime.id}.webp`);
-        return;
-      }
-    }
-
-    // Fallback final: Póster generado en SVG (garantiza que nunca quede roto)
-    const svgFallback = getFallbackSvg(anime.name, studio?.name);
-    setImageSrc(svgFallback);
-    setIsLoaded(true);
-  };
-
   // Watched state
   const [isWatched, setIsWatched] = useState<boolean>(() => {
     try {
@@ -704,21 +637,17 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
       {/* Immersive Cover Photo: Solo en tema violeta oscuro (en tema negro no sale la imagen de fondo) */}
       {appTheme !== 'black' && (
         <div className="absolute inset-0 w-full h-full pointer-events-none z-0 overflow-hidden select-none">
-          {imageSrc && (
-            <img
-              src={portadaUrl(imageSrc, 'fondo')}
-              alt={anime.name}
-              loading="eager"
-              decoding="async"
-              width={400}
-              height={600}
-              referrerPolicy="no-referrer"
-              onLoad={() => setIsLoaded(true)}
-              className={`w-full h-full object-cover object-center transition-opacity duration-700 ${
-                isLoaded ? 'opacity-100' : 'opacity-0'
-              }`}
-            />
-          )}
+          <SmartAnimeCover
+            anime={anime}
+            studioName={studio?.name || 'Estudio'}
+            alt={anime.name}
+            tamaño="fondo"
+            priority={true}
+            loading="eager"
+            width={400}
+            height={600}
+            className="w-full h-full object-cover object-center"
+          />
           {/* Cinematic gradient & dark overlay to guarantee 100% legibility of text, buttons and cards */}
           <div className="absolute inset-0 bg-black/60" />
           <div className="absolute inset-0 bg-gradient-to-t from-[#09060f] via-[#09060f]/75 to-transparent" />
@@ -753,6 +682,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
               priority={true}
               loading="eager"
               naturalSize={true}
+              saveFullToCache={true}
               className="w-full h-auto block select-auto"
             />
           </div>
@@ -1148,8 +1078,6 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-1 sm:gap-1.5 max-w-2xl">
                   {displayEpisodes.map((ep) => {
                     const ownThumb = ep.thumbnail || ep.coverImage;
-                    const fallbackCover = anime.coverData || anime.image;
-                    const epCover = ownThumb || (fallbackCover ? portadaUrl(fallbackCover, 'episodio') : '');
 
                     return (
                       <div
@@ -1164,9 +1092,9 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                         className="group relative aspect-video w-full rounded-xl overflow-hidden cursor-pointer transition-all duration-200 shadow-md select-none active:scale-[0.98] hover:opacity-95 outline-none border border-purple-900/40"
                       >
                         {/* Episode Thumbnail */}
-                        {epCover ? (
+                        {ownThumb ? (
                           <img
-                            src={epCover}
+                            src={ownThumb}
                             alt={`Episodio ${ep.number}`}
                             loading="lazy"
                             decoding="async"
@@ -1178,9 +1106,16 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                             }}
                           />
                         ) : (
-                          <div className="w-full h-full bg-[#150a24] flex items-center justify-center">
-                            <Film className="h-6 w-6 text-purple-400/40" />
-                          </div>
+                          <SmartAnimeCover
+                            anime={anime}
+                            studioName={studio?.name || 'Estudio'}
+                            alt={`Episodio ${ep.number}`}
+                            tamaño="episodio"
+                            loading="lazy"
+                            width={500}
+                            height={281}
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                          />
                         )}
 
                         {/* Subtle dark gradient overlay */}
@@ -1533,10 +1468,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                           {/* Cuadrícula de 2 Columnas */}
                           <div className="grid grid-cols-2 gap-1 sm:gap-1.5 max-h-56 overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-purple-900/60 scrollbar-track-transparent">
                             {displayEpisodes.map((ep) => {
-                              const isActive = ep.number === (currentEpisode?.number || 1);
                               const ownThumb = ep.thumbnail || ep.coverImage;
-                              const fallbackCover = anime.coverData || anime.image;
-                              const epCover = ownThumb || (fallbackCover ? portadaUrl(fallbackCover, 'episodio') : '');
 
                               return (
                                 <div
@@ -1544,9 +1476,9 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                                   onClick={() => setActiveEpisodeNum(ep.number)}
                                   className="group relative aspect-video w-full rounded-xl overflow-hidden cursor-pointer transition-all duration-200 shadow-md select-none active:scale-[0.98] hover:opacity-95 border-0 outline-none"
                                 >
-                                  {epCover ? (
+                                  {ownThumb ? (
                                     <img
-                                      src={epCover}
+                                      src={ownThumb}
                                       alt={`Episodio ${ep.number}`}
                                       loading="lazy"
                                       decoding="async"
@@ -1558,9 +1490,16 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                                       }}
                                     />
                                   ) : (
-                                    <div className="w-full h-full bg-[#150a24] flex items-center justify-center">
-                                      <Film className="h-6 w-6 text-purple-400/40" />
-                                    </div>
+                                    <SmartAnimeCover
+                                      anime={anime}
+                                      studioName={studio?.name || 'Estudio'}
+                                      alt={`Episodio ${ep.number}`}
+                                      tamaño="episodio"
+                                      loading="lazy"
+                                      width={500}
+                                      height={281}
+                                      className="w-full h-full object-cover"
+                                    />
                                   )}
 
                                   <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-black/20 pointer-events-none" />

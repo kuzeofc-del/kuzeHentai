@@ -6,7 +6,7 @@
 import React, { useState, useMemo, useRef, useDeferredValue, useEffect } from 'react';
 import { db, doc, setDoc } from '../lib/firebase';
 import { Anime, Episode, Studio } from '../types';
-import { SmartAnimeCover, getFallbackSvg, portadaUrl } from '../utils/imageFallback';
+import { SmartAnimeCover, getFallbackSvg } from '../utils/imageFallback';
 import {
   Search, Film, Trash2, Save, ArrowLeft, Upload, Link as LinkIcon,
   Check, AlertCircle, Image as ImageIcon, X, RefreshCw
@@ -142,13 +142,12 @@ export const AdminEpisodeManager: React.FC<AdminEpisodeManagerProps> = ({
           : (baseTime + epNum * 1000);
 
         const ownThumb = ep.thumbnail || ep.coverImage;
-        const fallbackCover = anime.coverData || anime.image;
         items.push({
           id: `${anime.id}-ep-${epNum}`,
           anime,
           episode: ep,
           episodeNumber: epNum,
-          coverImage: ownThumb || (fallbackCover ? portadaUrl(fallbackCover, 'episodio') : undefined),
+          coverImage: ownThumb || undefined,
           mp4Url: getEpisodeUrl(ep),
           timestamp: epTimestamp,
           studioName,
@@ -715,9 +714,16 @@ export const AdminEpisodeManager: React.FC<AdminEpisodeManagerProps> = ({
                         }}
                       />
                     ) : (
-                      <div className="w-full h-full bg-[#150a24] flex items-center justify-center">
-                        <Film className="h-6 w-6 text-purple-400/40" />
-                      </div>
+                      <SmartAnimeCover
+                        anime={item.anime}
+                        studioName={item.studioName}
+                        alt={`${item.anime.name} - Ep ${item.episodeNumber}`}
+                        tamaño="episodio"
+                        loading="lazy"
+                        width={500}
+                        height={281}
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                      />
                     )}
 
                     {/* Subtle dark gradient overlay */}

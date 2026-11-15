@@ -255,6 +255,7 @@ export default function PopularHeroCarousel({
               tamaño="original"
               priority={true}
               loading="eager"
+              saveFullToCache={false}
               className="w-full h-full object-cover object-[center_top] sm:object-[center_12%]"
             />
           </motion.div>

@@ -16,7 +16,7 @@ import {
   ArrowUpDown 
 } from 'lucide-react';
 import { getAnimeRatingStats } from '../utils/ratingManager';
-import { getFallbackSvg, preloadAllAnimes, portadaUrl } from '../utils/imageFallback';
+import { getFallbackSvg, preloadAllAnimes, portadaUrl, SmartAnimeCover } from '../utils/imageFallback';
 import GalleryCard from './GalleryCard';
 
 export type StudioSortType = 'name-asc' | 'name-desc' | 'rating-desc' | 'rating-asc' | 'date-desc' | 'date-asc';
@@ -123,8 +123,8 @@ export default function StudioDetailModal({
     };
   }, [studioAnimes]);
 
-  // Studio cover image: studio.image or first anime cover
-  const studioCover = studio.image || studioAnimes[0]?.coverData || studioAnimes[0]?.image;
+  // Studio fallback anime when studio.image is absent
+  const firstStudioAnime = studioAnimes[0] || null;
 
   // Sort studio animes based on user selection
   const sortedStudioAnimes = useMemo(() => {
@@ -352,9 +352,9 @@ export default function StudioDetailModal({
         <div className="flex flex-row items-center sm:items-start gap-4 sm:gap-7 relative z-10 pt-2 px-2.5 sm:px-0">
           {/* Portada del estudio REDONDA */}
           <div className="w-28 h-28 xs:w-32 xs:h-32 sm:w-44 sm:h-44 md:w-52 md:h-52 rounded-full overflow-hidden shadow-2xl shrink-0 flex items-center justify-center relative select-none bg-purple-950/20">
-            {studioCover ? (
+            {studio.image ? (
               <img
-                src={portadaUrl(studioCover, 'estudio')}
+                src={portadaUrl(studio.image, 'estudio')}
                 alt={studio.name}
                 loading="lazy"
                 decoding="async"
@@ -364,6 +364,18 @@ export default function StudioDetailModal({
                 onError={(e) => {
                   e.currentTarget.src = getFallbackSvg(studio.name);
                 }}
+              />
+            ) : firstStudioAnime ? (
+              <SmartAnimeCover
+                anime={firstStudioAnime}
+                studioName={studio.name}
+                alt={studio.name}
+                tamaño="estudio"
+                priority={true}
+                loading="eager"
+                width={270}
+                height={270}
+                className="w-full h-full object-cover rounded-full drop-shadow-[0_10px_25px_rgba(0,0,0,0.6)] transition-transform duration-300 hover:scale-105"
               />
             ) : (
               <div className="w-full h-full flex flex-col items-center justify-center text-center p-3 rounded-full bg-purple-950/20">

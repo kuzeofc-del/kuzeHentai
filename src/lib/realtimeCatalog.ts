@@ -37,6 +37,7 @@ export function mapFirestoreAnimeDoc(docSnap: any): Anime {
     coverData: hasExternalUrl
       ? undefined
       : (d.coverData || (resolvedImage.startsWith('data:') ? resolvedImage : undefined)),
+    portadaVersion: typeof d.portadaVersion === 'number' ? d.portadaVersion : undefined,
     year: d.year ? normalizeAnimeYear(d.year) : '',
     releaseMonth: d.releaseMonth || d.release_month || '',
     telegramUrl: d.telegramUrl || '',

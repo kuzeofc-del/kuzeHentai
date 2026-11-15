@@ -21,7 +21,6 @@ import {
   persistentLocalCache,
   persistentMultipleTabManager,
   memoryLocalCache,
-  CACHE_SIZE_UNLIMITED,
   setLogLevel,
   collection, 
   addDoc, 
@@ -106,7 +105,7 @@ if (isFirebaseConfigured && firebaseConfig) {
       localCache: canUseIndexedDb
         ? persistentLocalCache({
             tabManager: persistentMultipleTabManager(),
-            cacheSizeBytes: CACHE_SIZE_UNLIMITED
+            cacheSizeBytes: 100 * 1024 * 1024 // 100 MB
           })
         : memoryLocalCache(),
       experimentalAutoDetectLongPolling: true,

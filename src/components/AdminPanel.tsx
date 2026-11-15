@@ -6,9 +6,10 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { User } from 'firebase/auth';
-import { db, auth, doc, setDoc, deleteDoc, updateDoc, collection, getDocs, getDocsFromServer, deleteField, isFirebaseConfigured } from '../lib/firebase';
+import { db, auth, doc, setDoc, getDoc, getDocFromServer, deleteDoc, updateDoc, collection, getDocs, getDocsFromServer, deleteField, isFirebaseConfigured } from '../lib/firebase';
 import { Studio, Genre, Anime, DatabaseSchema, getNormalizedKey, normalizeAnimeYear, resolveContinuationGroup, sortAnimesByYearAsc, formatContinuationTitle } from '../types';
 import { SmartAnimeCover, getFallbackSvg, globalCoverDataMap, portadaUrl } from '../utils/imageFallback';
+import { fetchPortadaFromFirestore, upsertPortadaCache, deletePortadaFromIdb, getPortadaFromIdb } from '../lib/coverCache';
 import { 
   Lock, User as UserIcon, LogOut, Plus, Trash2, Edit2, Save, EyeOff, Eye, Upload, Folder,
   Settings, Database, RefreshCw, Layers, Film, Tag, ArrowLeft, Download, Check, AlertCircle, Search, Building2, Sparkles,
@@ -435,6 +436,25 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
   const [animeImage, setAnimeImage] = useState('');
   const [animeCoverUrlInput, setAnimeCoverUrlInput] = useState('');
   const [isImageOptimized, setIsImageOptimized] = useState(false);
+  const [isLoadingEditCover, setIsLoadingEditCover] = useState(false);
+  const initialEditCoverRef = useRef<string>('');
+  const editingAnimeIdRef = useRef<string | null>(null);
+  const [isMigratingPortadas, setIsMigratingPortadas] = useState(false);
+  const [migrationProgress, setMigrationProgress] = useState<{
+    current: number;
+    total: number;
+    migrated: number;
+    alreadyMigrated: number;
+    skippedHttp: number;
+    skippedEmpty: number;
+    errors: number;
+    batchNumber: number;
+    totalBatches: number;
+    percent: number;
+    lastAnimeName?: string;
+    done?: boolean;
+    errorDetails?: string[];
+  } | null>(null);
   const [animeStudioId, setAnimeStudioId] = useState('');
   const [animeStudioSearch, setAnimeStudioSearch] = useState('');
   const [showStudioPicker, setShowStudioPicker] = useState(false);
@@ -1992,6 +2012,9 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
 
   // --- ANIME ACTIONS ---
   const openNewAnimeForm = () => {
+    editingAnimeIdRef.current = null;
+    initialEditCoverRef.current = '';
+    setIsLoadingEditCover(false);
     setEditingAnime(null);
     setAnimeName('');
     setAnimeImage('');
@@ -2022,15 +2045,54 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
   };
 
   const openEditAnimeForm = (anime: Anime) => {
+    editingAnimeIdRef.current = anime.id;
     setEditingAnime(anime);
     setAnimeName(anime.name);
     const hasExternalUrl = Boolean(anime.image && /^https?:\/\//i.test(anime.image.trim()));
-    const initialCover = hasExternalUrl
-      ? anime.image.trim()
-      : ((anime.coverData && anime.coverData.startsWith('data:image/')) ? anime.coverData : (anime.image || ''));
+    const inlineBase64 =
+      (anime.coverData && anime.coverData.startsWith('data:image/'))
+        ? anime.coverData
+        : (anime.image && anime.image.startsWith('data:image/') ? anime.image : '');
+    const initialCover = hasExternalUrl ? anime.image.trim() : inlineBase64;
+    initialEditCoverRef.current = initialCover;
     setAnimeImage(initialCover);
     setAnimeCoverUrlInput(hasExternalUrl ? anime.image.trim() : '');
     setIsImageOptimized(false);
+
+    if (!hasExternalUrl && !inlineBase64 && anime.id) {
+      setIsLoadingEditCover(true);
+      const targetEditId = anime.id;
+      const expectedVer = typeof anime.portadaVersion === 'number' ? anime.portadaVersion : 1;
+      (async () => {
+        try {
+          const cached = await getPortadaFromIdb(targetEditId);
+          if (cached && cached.portadaVersion === expectedVer && cached.full) {
+            if (editingAnimeIdRef.current === targetEditId) {
+              initialEditCoverRef.current = cached.full;
+              setAnimeImage(cached.full);
+            }
+            return;
+          }
+          const remote = await fetchPortadaFromFirestore(targetEditId, expectedVer);
+          if (remote?.imagen && editingAnimeIdRef.current === targetEditId) {
+            initialEditCoverRef.current = remote.imagen;
+            setAnimeImage(remote.imagen);
+            await upsertPortadaCache(targetEditId, remote.imagen, remote.portadaVersion).catch(() => {});
+          } else if (cached?.thumb && editingAnimeIdRef.current === targetEditId) {
+            initialEditCoverRef.current = cached.thumb;
+            setAnimeImage(cached.thumb);
+          }
+        } catch {
+          // Ignore load error
+        } finally {
+          if (editingAnimeIdRef.current === targetEditId) {
+            setIsLoadingEditCover(false);
+          }
+        }
+      })();
+    } else {
+      setIsLoadingEditCover(false);
+    }
     
     const sIds = (anime.studioIds && anime.studioIds.length > 0)
       ? anime.studioIds
@@ -2760,12 +2822,30 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
           globalCoverDataMap.delete(targetId);
         }
 
+        let nextPortadaVersion: number | undefined = undefined;
+        if (isBase64Cover) {
+          const prevVer = typeof editingAnime?.portadaVersion === 'number' ? editingAnime.portadaVersion : 0;
+          const coverChanged = !editingAnime || safeCover !== initialEditCoverRef.current || prevVer === 0;
+          nextPortadaVersion = coverChanged ? prevVer + 1 : prevVer;
+          if (coverChanged) {
+            await setDoc(doc(db, 'portadas', targetId), {
+              imagen: safeCover,
+              portadaVersion: nextPortadaVersion
+            });
+            await upsertPortadaCache(targetId, safeCover, nextPortadaVersion);
+          }
+        } else if (isExternalCoverUrl || !safeCover) {
+          await deleteDoc(doc(db, 'portadas', targetId)).catch(() => null);
+          await deletePortadaFromIdb(targetId).catch(() => {});
+        }
+
         const fsWriteData: Record<string, any> = {
           id: targetId,
           name: trimmedName,
-          image: isBase64Cover ? `/api/covers/${targetId}.webp` : safeCover,
-          coverData: isBase64Cover ? safeCover : deleteField(),
+          image: isBase64Cover ? deleteField() : safeCover,
+          coverData: deleteField(),
           coverUrl: deleteField(),
+          portadaVersion: isBase64Cover && nextPortadaVersion ? nextPortadaVersion : deleteField(),
           studioId: deleteField(),
           studioIds: targetStudioIds,
           genreIds: targetGenreIds,
@@ -2796,8 +2876,9 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
         const savedAnimeObj: Anime = {
           id: targetId,
           name: trimmedName,
-          image: isBase64Cover ? `/api/covers/${targetId}.webp` : safeCover,
-          coverData: isBase64Cover ? safeCover : undefined,
+          image: isBase64Cover ? '' : safeCover,
+          coverData: undefined,
+          portadaVersion: isBase64Cover ? nextPortadaVersion : undefined,
           studioId: primaryStudioId,
           studioIds: targetStudioIds,
           genreIds: targetGenreIds,
@@ -2958,12 +3039,30 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
           .map((ep, idx) => sanitizeEpisodeForFirestore({ ...ep, number: Number(ep.number) || (idx + 1) }))
           .filter(ep => ep.mp4Url !== '');
 
+        let nextPortadaVersion: number | undefined = undefined;
+        if (isBase64Cover) {
+          const prevVer = typeof editingAnime?.portadaVersion === 'number' ? editingAnime.portadaVersion : 0;
+          const coverChanged = !editingAnime || safeCover !== initialEditCoverRef.current || prevVer === 0;
+          nextPortadaVersion = coverChanged ? prevVer + 1 : prevVer;
+          if (coverChanged) {
+            await setDoc(doc(db, 'portadas', targetId), {
+              imagen: safeCover,
+              portadaVersion: nextPortadaVersion
+            });
+            await upsertPortadaCache(targetId, safeCover, nextPortadaVersion);
+          }
+        } else {
+          await deleteDoc(doc(db, 'portadas', targetId)).catch(() => null);
+          await deletePortadaFromIdb(targetId).catch(() => {});
+        }
+
         const fsWriteData: Record<string, any> = {
           name: trimmedName,
           id: targetId,
-          image: isBase64Cover ? `/api/covers/${targetId}.webp` : safeCover,
-          coverData: isBase64Cover ? safeCover : deleteField(),
+          image: isBase64Cover ? deleteField() : safeCover,
+          coverData: deleteField(),
           coverUrl: deleteField(),
+          portadaVersion: isBase64Cover && nextPortadaVersion ? nextPortadaVersion : deleteField(),
           studioId: deleteField(),
           studioIds: targetStudioIds,
           genreIds: animeGenreIds,
@@ -2986,8 +3085,9 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
         const savedFallbackAnime: Anime = {
           name: trimmedName,
           id: targetId,
-          image: isBase64Cover ? `/api/covers/${targetId}.webp` : safeCover,
-          coverData: isBase64Cover ? safeCover : undefined,
+          image: isBase64Cover ? '' : safeCover,
+          coverData: undefined,
+          portadaVersion: isBase64Cover ? nextPortadaVersion : undefined,
           studioId: targetStudioIds[0] || '',
           studioIds: targetStudioIds,
           genreIds: animeGenreIds,
@@ -3019,6 +3119,158 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
     }
   };
 
+  const handleMigratePortadasToCollection = async () => {
+    if (!isAdminEmail || isMigratingPortadas) return;
+    if (!db) {
+      showNotification('No hay base de datos Firebase conectada.', 'error');
+      return;
+    }
+
+    setIsMigratingPortadas(true);
+    const errorDetails: string[] = [];
+    let migrated = 0;
+    let alreadyMigrated = 0;
+    let skippedHttp = 0;
+    let skippedEmpty = 0;
+    let errors = 0;
+
+    try {
+      const animesSnap = await getDocsFromServer(collection(db, 'animes'));
+      const docsList = animesSnap.docs;
+      const total = docsList.length;
+      const BATCH_SIZE = 20;
+      const totalBatches = Math.max(1, Math.ceil(total / BATCH_SIZE));
+
+      setMigrationProgress({
+        current: 0,
+        total,
+        migrated: 0,
+        alreadyMigrated: 0,
+        skippedHttp: 0,
+        skippedEmpty: 0,
+        errors: 0,
+        batchNumber: 0,
+        totalBatches,
+        percent: 0,
+      });
+
+      let processed = 0;
+
+      for (let i = 0; i < total; i += BATCH_SIZE) {
+        const batchDocs = docsList.slice(i, i + BATCH_SIZE);
+        const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
+
+        await Promise.all(
+          batchDocs.map(async (animeDocSnap) => {
+            const docId = animeDocSnap.id;
+            const data = animeDocSnap.data() || {};
+            const animeTitle = String(data.name || docId);
+
+            try {
+              const rawImgStr = typeof data.image === 'string' ? data.image.trim() : '';
+              const rawCoverUrlStr = typeof data.coverUrl === 'string' ? data.coverUrl.trim() : '';
+
+              // No tocar URLs externas que empiezan con http
+              if (rawImgStr.toLowerCase().startsWith('http') || rawCoverUrlStr.toLowerCase().startsWith('http')) {
+                skippedHttp++;
+                return;
+              }
+
+              const coverDataStr = typeof data.coverData === 'string' ? data.coverData.trim() : '';
+              const base64Cover = coverDataStr.startsWith('data:image')
+                ? coverDataStr
+                : (rawImgStr.startsWith('data:image') ? rawImgStr : '');
+
+              if (!base64Cover) {
+                if (typeof data.portadaVersion === 'number' && data.portadaVersion >= 1) {
+                  alreadyMigrated++;
+                } else {
+                  skippedEmpty++;
+                }
+                return;
+              }
+
+              // 1. Copiar portada a portadas/{mismoId} con imagen y portadaVersion = 1
+              const portadaRef = doc(db, 'portadas', docId);
+              await setDoc(portadaRef, {
+                imagen: base64Cover,
+                portadaVersion: 1,
+              });
+
+              // 2. Confirmar desde el servidor que la copia se guardó correctamente antes de borrar del doc del anime
+              const verifySnap = await getDocFromServer(portadaRef);
+              const verifiedData = verifySnap.exists() ? verifySnap.data() : null;
+              if (
+                !verifiedData ||
+                verifiedData.imagen !== base64Cover ||
+                verifiedData.portadaVersion !== 1
+              ) {
+                throw new Error('La verificación en servidor de portadas/' + docId + ' no coincidió');
+              }
+
+              // 3. Eliminar campos de imagen del documento animes/{id} y dejar portadaVersion = 1
+              await updateDoc(doc(db, 'animes', docId), {
+                coverData: deleteField(),
+                coverUrl: deleteField(),
+                image: deleteField(),
+                portadaVersion: 1,
+              });
+
+              migrated++;
+            } catch (docErr: any) {
+              errors++;
+              errorDetails.push(`${animeTitle} (${docId}): ${docErr?.message || 'Error desconocido'}`);
+            } finally {
+              processed++;
+              setMigrationProgress({
+                current: processed,
+                total,
+                migrated,
+                alreadyMigrated,
+                skippedHttp,
+                skippedEmpty,
+                errors,
+                batchNumber,
+                totalBatches,
+                percent: total > 0 ? Math.round((processed / total) * 100) : 100,
+                lastAnimeName: animeTitle,
+                errorDetails: errorDetails.slice(0, 20),
+              });
+            }
+          })
+        );
+      }
+
+      setMigrationProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              percent: 100,
+              done: true,
+              errorDetails: errorDetails.slice(0, 20),
+            }
+          : null
+      );
+
+      if (errors === 0) {
+        showNotification(
+          `Migración completada: ${migrated} portadas migradas, ${alreadyMigrated} ya migradas, ${skippedHttp} URLs externas intactas.`,
+          'success'
+        );
+      } else {
+        showNotification(
+          `Migración finalizada con ${errors} error(es). Puedes volver a ejecutarla para reintentar los pendientes.`,
+          'error'
+        );
+      }
+      onRefresh();
+    } catch (err: any) {
+      showNotification('Error al iniciar migración: ' + (err?.message || 'Error de red'), 'error');
+    } finally {
+      setIsMigratingPortadas(false);
+    }
+  };
+
   const executeDeleteAnime = async (id: string) => {
     const targetAnime = animes.find(a => a.id === id);
     if (targetAnime?.name) {
@@ -3027,6 +3279,8 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
     try {
       const res = await fetch(`/api/animes/${id}`, { method: 'DELETE', headers: apiHeaders }).catch(() => null);
       if (res && res.ok) {
+        if (db) await deleteDoc(doc(db, 'portadas', id)).catch(() => null);
+        await deletePortadaFromIdb(id).catch(() => {});
         onRefresh(undefined, id);
         showNotification('Anime eliminado y movido a la papelera', 'success');
         return;
@@ -3034,12 +3288,16 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
       // Direct Firestore fallback for Vercel/Static hosting
       if (!db) throw new Error('No hay base de datos Firebase conectada.');
       await deleteDoc(doc(db, 'animes', id));
+      await deleteDoc(doc(db, 'portadas', id)).catch(() => null);
+      await deletePortadaFromIdb(id).catch(() => {});
       onRefresh(undefined, id);
       showNotification('Anime eliminado y movido a la papelera', 'success');
     } catch (err: any) {
       try {
         if (!db) throw new Error('No hay base de datos Firebase conectada.');
         await deleteDoc(doc(db, 'animes', id));
+        await deleteDoc(doc(db, 'portadas', id)).catch(() => null);
+        await deletePortadaFromIdb(id).catch(() => {});
         onRefresh(undefined, id);
         showNotification('Anime eliminado y movido a la papelera', 'success');
       } catch (fbErr: any) {
@@ -3488,13 +3746,30 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
         setBackupStatus(`Empaquetando anime ${currentNum} de ${combinedAnimesList.length} (${pct}%): "${a.name}" (portada y episodios)...`);
 
         const cachedIdbCover = globalCoverDataMap.get(a.id);
-        const rawCoverCandidate = (a.coverData && a.coverData.startsWith('data:image/'))
+        let rawCoverCandidate = (a.coverData && a.coverData.startsWith('data:image/'))
           ? a.coverData
           : (a.image && a.image.startsWith('data:image/'))
           ? a.image
+          : (a.image && /^https?:\/\//i.test(a.image.trim()))
+          ? a.image.trim()
           : (cachedIdbCover && cachedIdbCover.startsWith('data:image/'))
           ? cachedIdbCover
-          : (a.coverData || a.image || `/api/covers/${a.id}.webp`);
+          : '';
+
+        if (!rawCoverCandidate && a.id) {
+          const idbRec = await getPortadaFromIdb(a.id).catch(() => null);
+          if (idbRec?.full && idbRec.full.startsWith('data:image/')) {
+            rawCoverCandidate = idbRec.full;
+          } else {
+            const fsPortada = await fetchPortadaFromFirestore(a.id, a.portadaVersion).catch(() => null);
+            if (fsPortada?.imagen) {
+              rawCoverCandidate = fsPortada.imagen;
+            }
+          }
+        }
+        if (!rawCoverCandidate) {
+          rawCoverCandidate = a.coverData || a.image || `/api/covers/${a.id}.webp`;
+        }
 
         const resolvedCover = await resolveImageToBase64(rawCoverCandidate);
         const finalBase64Cover = resolvedCover.startsWith('data:image/') ? resolvedCover : (a.coverData || cachedIdbCover || '');
@@ -4223,14 +4498,14 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
           const createdAt = rawAnime.createdAt || rawAnime.created_at || new Date(Date.now() - 10000000 + orderIdx * 1000).toISOString();
           const updatedAt = rawAnime.updatedAt || rawAnime.updated_at || createdAt || nowIso;
 
-          const resolvedImage = isBase64Cover ? `/api/covers/${animeId}.webp` : safeCover;
-          const isExternalUrlCover = /^https?:\/\//i.test(resolvedImage);
+          const isExternalUrlCover = /^https?:\/\//i.test(safeCover);
           const resolvedReleaseMonth = rawAnime.releaseMonth ? String(rawAnime.releaseMonth).trim() : '';
+          const importedPortadaVersion = Number(rawAnime.portadaVersion) || 1;
 
           const fsAnimeDoc: Record<string, any> = {
             id: animeId,
             name: animeName,
-            image: resolvedImage,
+            image: isExternalUrlCover ? safeCover : '',
             studioIds: sIds,
             genreIds: gIds,
             status: String(rawAnime.status || 'Finalizado').trim(),
@@ -4246,7 +4521,12 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
           };
 
           if (!isExternalUrlCover && isBase64Cover && safeCover) {
-            fsAnimeDoc.coverData = safeCover;
+            await setDoc(doc(db, 'portadas', animeId), {
+              imagen: safeCover,
+              portadaVersion: importedPortadaVersion
+            }).catch(() => null);
+            fsAnimeDoc.portadaVersion = importedPortadaVersion;
+            delete fsAnimeDoc.image;
           }
           if (resolvedReleaseMonth) {
             fsAnimeDoc.releaseMonth = resolvedReleaseMonth;
@@ -4261,16 +4541,13 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
           try {
             await setDoc(doc(db, 'animes', animeId), fsAnimeDoc);
           } catch (docErr) {
-            // If document exceeded Firestore 1MB limit due to embedded thumbnails or heavy cover, save sanitized version
+            // If document exceeded Firestore 1MB limit due to embedded episode thumbnails, save sanitized version
             const leanEpisodes = cleanEpisodes.map((ep: any) => ({
               ...ep,
               thumbnail: (ep.thumbnail && ep.thumbnail.length > 50000) ? undefined : ep.thumbnail,
               coverImage: (ep.coverImage && ep.coverImage.length > 50000) ? undefined : ep.coverImage
             }));
             const leanDoc: Record<string, any> = { ...fsAnimeDoc, episodes: leanEpisodes };
-            if (typeof leanDoc.coverData === 'string' && leanDoc.coverData.length > 100000) {
-              delete leanDoc.coverData;
-            }
             await setDoc(doc(db, 'animes', animeId), leanDoc).catch(() => null);
           }
         }
@@ -4971,7 +5248,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
               </div>
 
               {!isAnimeFormOpen && (
-                <div className="w-full">
+                <div className="w-full space-y-2.5">
                   <button
                     type="button"
                     onClick={openNewAnimeForm}
@@ -4981,6 +5258,70 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                     <Plus className="h-4 w-4" />
                     <span>Agregar Hentai</span>
                   </button>
+
+                  {isAdminEmail && (
+                    <div className="p-3 sm:p-4 bg-[#110820] border border-purple-500/30 rounded-xl space-y-2.5">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                        <div className="min-w-0">
+                          <h3 className="font-display font-bold text-xs uppercase tracking-wider text-purple-200 flex items-center gap-1.5">
+                            <Database className="h-3.5 w-3.5 text-purple-400 shrink-0" />
+                            <span>Migrar Portadas Base64 a portadas/&#123;id&#125;</span>
+                          </h3>
+                          <p className="font-sans text-[11px] text-neutral-400 mt-0.5">
+                            Mueve portadas <code className="text-purple-300">data:image</code> a la colección separada en lotes de 20, verifica en servidor y limpia el documento del anime (sin tocar URLs <code className="text-purple-300">http</code>).
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleMigratePortadasToCollection}
+                          disabled={isMigratingPortadas}
+                          className="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-lg font-mono text-[11px] font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-md shadow-purple-900/30"
+                        >
+                          <RefreshCw className={`h-3.5 w-3.5 ${isMigratingPortadas ? 'animate-spin' : ''}`} />
+                          <span>{isMigratingPortadas ? 'Migrando...' : 'Migrar Portadas'}</span>
+                        </button>
+                      </div>
+
+                      {migrationProgress && (
+                        <div className="space-y-1.5 pt-1 border-t border-white/10">
+                          <div className="flex items-center justify-between text-[11px] font-mono">
+                            <span className="text-neutral-300 truncate pr-2">
+                              {migrationProgress.done
+                                ? 'Migración finalizada'
+                                : `Lote ${migrationProgress.batchNumber}/${migrationProgress.totalBatches}${migrationProgress.lastAnimeName ? ` • ${migrationProgress.lastAnimeName}` : ''}`}
+                            </span>
+                            <span className="text-purple-300 font-bold shrink-0">
+                              {migrationProgress.current} / {migrationProgress.total} ({migrationProgress.percent}%)
+                            </span>
+                          </div>
+                          <div className="w-full h-2 bg-black/60 rounded-full overflow-hidden border border-white/10">
+                            <div
+                              className="h-full bg-gradient-to-r from-purple-600 to-emerald-500 transition-all duration-300"
+                              style={{ width: `${Math.max(2, Math.min(100, migrationProgress.percent))}%` }}
+                            />
+                          </div>
+                          <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] font-mono text-neutral-400">
+                            <span className="text-emerald-400">Migradas: {migrationProgress.migrated}</span>
+                            <span className="text-sky-400">Ya migradas: {migrationProgress.alreadyMigrated}</span>
+                            <span className="text-amber-400">URLs http intactas: {migrationProgress.skippedHttp}</span>
+                            {migrationProgress.skippedEmpty > 0 && (
+                              <span>Sin portada: {migrationProgress.skippedEmpty}</span>
+                            )}
+                            {migrationProgress.errors > 0 && (
+                              <span className="text-red-400 font-bold">Errores: {migrationProgress.errors}</span>
+                            )}
+                          </div>
+                          {migrationProgress.errorDetails && migrationProgress.errorDetails.length > 0 && (
+                            <div className="p-2 bg-red-950/40 border border-red-500/30 rounded text-[10px] font-mono text-red-300 max-h-24 overflow-y-auto space-y-0.5">
+                              {migrationProgress.errorDetails.map((errMsg, errIdx) => (
+                                <div key={errIdx}>{errMsg}</div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -5043,6 +5384,11 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                             Eliminar
                           </button>
                         </>
+                      ) : isLoadingEditCover ? (
+                        <div className="text-center space-y-2 pointer-events-none">
+                          <div className="w-6 h-6 border-2 border-purple-500/30 border-t-purple-400 rounded-full animate-spin mx-auto" />
+                          <p className="font-mono text-[10px] text-purple-300">Cargando portada...</p>
+                        </div>
                       ) : (
                         <div className="text-center space-y-2 pointer-events-none">
                           <Upload className="h-8 w-8 text-neutral-700 mx-auto transition-transform duration-300 group-hover:-translate-y-1 group-hover:text-neutral-500" />
@@ -6513,7 +6859,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                 <div className="space-y-2">
                   {studios.map(studio => {
                     const count = studioAnimeCounts.get(studio.id) || 0;
-                    const studioCover = studio.image || animes.find(a => (a.studioIds?.includes(studio.id) || a.studioId === studio.id))?.coverData || animes.find(a => (a.studioIds?.includes(studio.id) || a.studioId === studio.id))?.image;
+                    const fallbackAnime = animes.find(a => (a.studioIds?.includes(studio.id) || a.studioId === studio.id));
 
                     return (
                       <div
@@ -6528,18 +6874,29 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                             onClick={() => {
                               setEditingStudio(studio);
                               setStudioName(studio.name);
-                              setStudioImage(studio.image || studioCover || '');
+                              setStudioImage(studio.image || '');
                               window.scrollTo({ top: 0, behavior: 'smooth' });
                             }}
                             title="Tocar foto para editar estudio"
                             className="w-14 h-14 sm:w-16 sm:h-16 rounded-lg bg-black/60 overflow-hidden shrink-0 flex items-center justify-center relative shadow-sm group cursor-pointer active:scale-95 transition-all"
                           >
-                            {studioCover ? (
+                            {studio.image ? (
                               <img
-                                src={portadaUrl(studioCover, 'mini')}
+                                src={portadaUrl(studio.image, 'mini')}
                                 alt={studio.name}
                                 loading="lazy"
                                 decoding="async"
+                                width={150}
+                                height={150}
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              />
+                            ) : fallbackAnime ? (
+                              <SmartAnimeCover
+                                anime={fallbackAnime}
+                                studioName={studio.name}
+                                alt={studio.name}
+                                tamaño="mini"
+                                loading="lazy"
                                 width={150}
                                 height={150}
                                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
@@ -6577,7 +6934,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                             onClick={() => {
                               setEditingStudio(studio);
                               setStudioName(studio.name);
-                              setStudioImage(studio.image || studioCover || '');
+                              setStudioImage(studio.image || '');
                               window.scrollTo({ top: 0, behavior: 'smooth' });
                             }}
                             className="p-1.5 text-neutral-400 hover:text-white hover:bg-white/10 rounded transition-colors duration-200 cursor-pointer"
@@ -6730,7 +7087,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                 <div className="space-y-2">
                   {genres.map(genre => {
                     const count = genreAnimeCounts.get(genre.id) || 0;
-                    const genreCover = genre.image || animes.find(a => a.genreIds?.includes(genre.id))?.coverData || animes.find(a => a.genreIds?.includes(genre.id))?.image;
+                    const fallbackAnime = animes.find(a => a.genreIds?.includes(genre.id));
 
                     return (
                       <div
@@ -6745,18 +7102,28 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                             onClick={() => {
                               setEditingGenre(genre);
                               setGenreName(genre.name);
-                              setGenreImage(genre.image || genreCover || '');
+                              setGenreImage(genre.image || '');
                               window.scrollTo({ top: 0, behavior: 'smooth' });
                             }}
                             title="Tocar foto para editar género"
                             className="w-14 h-14 sm:w-16 sm:h-16 rounded-lg bg-black/60 overflow-hidden shrink-0 flex items-center justify-center relative shadow-sm group cursor-pointer active:scale-95 transition-all"
                           >
-                            {genreCover ? (
+                            {genre.image ? (
                               <img
-                                src={portadaUrl(genreCover, 'mini')}
+                                src={portadaUrl(genre.image, 'mini')}
                                 alt={genre.name}
                                 loading="lazy"
                                 decoding="async"
+                                width={150}
+                                height={150}
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              />
+                            ) : fallbackAnime ? (
+                              <SmartAnimeCover
+                                anime={fallbackAnime}
+                                alt={genre.name}
+                                tamaño="mini"
+                                loading="lazy"
                                 width={150}
                                 height={150}
                                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
@@ -6794,7 +7161,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                             onClick={() => {
                               setEditingGenre(genre);
                               setGenreName(genre.name);
-                              setGenreImage(genre.image || genreCover || '');
+                              setGenreImage(genre.image || '');
                               window.scrollTo({ top: 0, behavior: 'smooth' });
                             }}
                             className="p-1.5 text-neutral-400 hover:text-white hover:bg-white/10 rounded transition-colors duration-200 cursor-pointer"

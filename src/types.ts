@@ -39,6 +39,7 @@ export interface Anime {
   image: string; // Base64 or URL
   coverData?: string; // Permanent base64 WebP image fallback
   coverUrl?: string; // External URL for cover image (Cloudinary, etc.)
+  portadaVersion?: number; // Version number synced with portadas/{id}
   studioId?: string;
   studioIds?: string[];
   genreIds: string[];
