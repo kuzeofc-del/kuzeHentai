@@ -1177,7 +1177,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                               title={relAnime.name}
                               className="group min-w-0 w-full flex flex-col gap-1 cursor-pointer p-0 text-left"
                             >
-                              <div className="relative w-full aspect-[2/3] bg-neutral-900 rounded-xl overflow-hidden border border-[#272236] group-hover:border-purple-500/70 transition-all duration-300 group-hover:scale-[1.03] shadow-md group-hover:shadow-lg group-hover:shadow-purple-500/10">
+                              <div className="relative w-full aspect-[2/3] bg-[#0e091b] rounded-xl overflow-hidden border border-[#272236] group-hover:border-purple-500/70 transition-all duration-300 group-hover:scale-[1.03] shadow-md group-hover:shadow-lg group-hover:shadow-purple-500/10">
                                 <SmartAnimeCover
                                   anime={relAnime}
                                   studioName={relStudio}
@@ -1241,7 +1241,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                               onPointerEnter={() => prefetchAnime(rec, studios)}
                               onTouchStart={() => prefetchAnime(rec, studios)}
                               title={rec.name}
-                              className="group relative aspect-[2/3] bg-neutral-900 rounded-xl overflow-hidden border border-[#272236] hover:border-brand-red/70 transition-all duration-300 hover:scale-[1.03] shadow-md hover:shadow-lg hover:shadow-brand-red/10 cursor-pointer block p-0 text-left"
+                              className="group relative aspect-[2/3] bg-[#0e091b] rounded-xl overflow-hidden border border-[#272236] hover:border-brand-red/70 transition-all duration-300 hover:scale-[1.03] shadow-md hover:shadow-lg hover:shadow-brand-red/10 cursor-pointer block p-0 text-left"
                             >
                               <SmartAnimeCover
                                 anime={rec}

@@ -198,7 +198,7 @@ export default function PopularHeroCarousel({
 
   if (loading) {
     return (
-      <div className="w-full relative rounded-t-none rounded-b-2xl sm:rounded-b-3xl overflow-hidden bg-[#0a0515] border-t-0 border-x border-b border-[#2b1747]/60 aspect-[4/5.9] xs:aspect-[3/4.8] sm:aspect-[16/12.8] md:aspect-[16/11.2] lg:aspect-[16/9.8] min-h-[575px] sm:min-h-[645px] md:min-h-[680px] max-h-[820px] no-swipe">
+      <div className="w-full relative rounded-t-none rounded-b-2xl sm:rounded-b-3xl overflow-hidden bg-[#a855f7]/15 border-t-0 border-x border-b border-[#2b1747]/60 aspect-[4/5.9] xs:aspect-[3/4.8] sm:aspect-[16/12.8] md:aspect-[16/11.2] lg:aspect-[16/9.8] min-h-[575px] sm:min-h-[645px] md:min-h-[680px] max-h-[820px] no-swipe">
         <div className="absolute inset-0 bg-gradient-to-t from-[#090514] via-[#090514]/30 to-transparent" />
         <div className="absolute bottom-5 left-5 right-5 space-y-2">
           <div className="h-6 w-52 bg-white/10 rounded-lg" />

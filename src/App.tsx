@@ -66,7 +66,7 @@ import { startCatalogIdlePreload } from './lib/coverCache';
 import { normalizeEpisodesList } from './utils/episodeUtils';
 import { enforceEpisodesRotation } from './utils/episodeRotation';
 import { getAnimeRatingStats } from './utils/ratingManager';
-import { computeHeroFeaturedAnimes, recordHeroAnimeView, computeDailyTop10Animes, computePreviousMonthPopularAnimes } from './utils/heroCycleManager';
+import { computeHeroFeaturedAnimes, recordHeroAnimeView, computeDailyTop10Animes } from './utils/heroCycleManager';
 
 const fingerprintMediaString = (str?: string): string => {
   if (!str) return '0';
@@ -90,7 +90,7 @@ const computeCatalogSignature = (list: Anime[]): string => {
 import { 
   Search, Film, Info, Plus, ChevronDown, Check, Send, AlertCircle, 
   MapPin, Heart, ExternalLink, ShieldCheck, Shield, Zap, Lock, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
-  SlidersHorizontal, X, RotateCcw, Flame, Menu, UserCheck, LogIn, Palette, Moon, Sparkles, Eye, Bookmark,
+  SlidersHorizontal, X, RotateCcw, Menu, UserCheck, LogIn, Palette, Moon, Sparkles, Eye, Bookmark,
   Calendar, LayoutGrid, Trophy
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -1823,30 +1823,6 @@ export default function App() {
     return computeDailyTop10Animes(animes);
   }, [animes, ratingVersion, heroCycleVersion]);
 
-  // --- Nombre del mes anterior en español dinámico y Populares del mes anterior (20 más populares que cambian cada mes) ---
-  const { previousMonthName, previousMonthPopularAnimes } = useMemo(() => {
-    const now = new Date();
-    // Mes anterior: si estamos en enero (mes 0), el mes anterior es diciembre (mes 11) del año anterior
-    const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-
-    // Nombres en minúscula en español
-    const monthNamesEs = [
-      'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
-      'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'
-    ];
-    const prevMonthIndex = prevMonthDate.getMonth();
-    const rawMonthName = monthNamesEs[prevMonthIndex] || 'el mes anterior';
-
-    return {
-      previousMonthName: rawMonthName,
-      previousMonthPopularAnimes: computePreviousMonthPopularAnimes(
-        animes,
-        prevMonthDate.getFullYear(),
-        prevMonthIndex
-      ),
-    };
-  }, [animes, ratingVersion, heroCycleVersion]);
-
   // --- Próximamente: animes etiquetados como 'Próximamente' ordenados por el mes de estreno más cercano ---
   const upcomingSectionAnimes = useMemo(() => {
     const visible = animes.filter(a => !a.hidden && isUpcomingStatus(a.status));
@@ -2066,7 +2042,6 @@ export default function App() {
     addList(recommendedAnimes);
     addList(latestCatalogAnimes);
     addList(top10Animes);
-    addList(previousMonthPopularAnimes);
     addList(upcomingSectionAnimes);
     addList(myListSectionAnimes);
     addList(catalogSectionAnimes.slice(0, 60));
@@ -2078,7 +2053,6 @@ export default function App() {
     recommendedAnimes,
     latestCatalogAnimes,
     top10Animes,
-    previousMonthPopularAnimes,
     upcomingSectionAnimes,
     myListSectionAnimes,
     catalogSectionAnimes,
@@ -2878,23 +2852,6 @@ export default function App() {
                 ))}
               </HorizontalSectionRow>
             )}
-
-            {/* SECCIÓN 4: POPULARES DEL MES ANTERIOR (ej. "Populares de septiembre", "Populares de octubre", etc.) */}
-            <HorizontalSectionRow
-              title={`Populares de ${previousMonthName}`}
-              icon={<Flame className="w-4 h-4 text-purple-400" />}
-            >
-              {previousMonthPopularAnimes.map((anime, idx) => (
-                <div key={`prev-month-${anime.id}`} className="w-[115px] xs:w-[130px] sm:w-[145px] md:w-[160px] shrink-0">
-                  <GalleryCard
-                    anime={anime}
-                    studios={studios}
-                    index={idx}
-                    onClick={() => navigateTo('detail', anime.id)}
-                  />
-                </div>
-              ))}
-            </HorizontalSectionRow>
 
             {/* SECCIÓN: GÉNEROS (Un anime aleatorio cada 24 horas por cada género) */}
             <DailyGenreSection
