@@ -884,7 +884,7 @@ export default function App() {
       if (!isCancelled) {
         setLoading(false);
       }
-    }, isDeviceOffline ? 2500 : 30000);
+    }, isDeviceOffline ? 2500 : 120000);
 
     // Recover scroll/animation cleanly when returning to the browser tab
     const handleAppResume = () => {
