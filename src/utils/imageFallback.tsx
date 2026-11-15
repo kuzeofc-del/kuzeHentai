@@ -350,6 +350,7 @@ interface SmartAnimeCoverProps {
   tamaño?: PortadaSize;
   width?: number;
   height?: number;
+  naturalSize?: boolean;
 }
 
 export function SmartAnimeCover({ 
@@ -361,7 +362,8 @@ export function SmartAnimeCover({
   priority = false,
   tamaño = 'original',
   width,
-  height
+  height,
+  naturalSize = false
 }: SmartAnimeCoverProps) {
   const initialSrc = processImageSrc(anime, studioName, tamaño);
   const [imageSrc, setImageSrc] = useState<string>(initialSrc);
@@ -450,8 +452,15 @@ export function SmartAnimeCover({
   const resolvedWidth = width ?? (!priority ? defaultDims.width : undefined);
   const resolvedHeight = height ?? (!priority ? defaultDims.height : undefined);
 
+  const wrapperClass = naturalSize
+    ? `w-full relative overflow-hidden select-auto pointer-events-auto bg-gradient-to-b ${placeholderGradient} ${!isLoaded && !hasFailed ? 'min-h-[260px] sm:min-h-[340px]' : ''}`
+    : `w-full h-full relative overflow-hidden select-none bg-gradient-to-b ${placeholderGradient}`;
+
   return (
-    <div className={`w-full h-full relative overflow-hidden select-none bg-gradient-to-b ${placeholderGradient}`}>
+    <div
+      className={wrapperClass}
+      style={naturalSize ? { WebkitTouchCallout: 'default', WebkitUserSelect: 'auto', userSelect: 'auto' } : undefined}
+    >
       {/* Calm, stable dark backdrop without flashing pulse animation */}
       {!isLoaded && !hasFailed && (
         <div className="absolute inset-0 bg-[#0c0517] pointer-events-none flex items-center justify-center">
@@ -471,6 +480,7 @@ export function SmartAnimeCover({
         referrerPolicy="no-referrer"
         onLoad={handleLoad}
         onError={handleError}
+        style={naturalSize ? { WebkitTouchCallout: 'default', WebkitUserSelect: 'auto', userSelect: 'auto' } : undefined}
         className={`${className} ${
           isInstant 
             ? 'opacity-100' 

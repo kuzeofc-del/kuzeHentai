@@ -726,10 +726,10 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
         </div>
       )}
 
-      {/* Hero Cover Banner: same size as Más Populares */}
+      {/* Hero Cover Banner: full-width frame with clean original-aspect artwork and no text overlay */}
       <div className="max-w-[1500px] 2xl:max-w-[1800px] 3xl:max-w-[2100px] mx-auto w-full z-10">
-        <div className="relative w-full rounded-t-none rounded-b-2xl sm:rounded-b-3xl overflow-hidden bg-[#090514] border-t-0 border-x border-b border-[#2b1747] shadow-xl shadow-black/70 aspect-[4/5.9] xs:aspect-[3/4.8] sm:aspect-[16/12.8] md:aspect-[16/11.2] lg:aspect-[16/9.8] min-h-[575px] sm:min-h-[645px] md:min-h-[680px] max-h-[820px] flex flex-col justify-end">
-          {/* Smaller Floating Back Button on top-left of the big cover */}
+        <div className="relative w-full rounded-t-none rounded-b-2xl sm:rounded-b-3xl overflow-hidden bg-[#090514] border-t-0 border-x border-b border-[#2b1747] shadow-xl shadow-black/70">
+          {/* Smaller Floating Back Button on top-left of the cover */}
           <button
             type="button"
             onClick={onBack}
@@ -740,8 +740,11 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
             <ArrowLeft className="h-4 w-4 sm:h-4.5 sm:w-4.5 transition-transform duration-200 group-hover:-translate-x-0.5 shrink-0 text-white" />
           </button>
 
-          {/* Full Anime Cover Artwork inside the frame */}
-          <div className="absolute inset-0 w-full h-full pointer-events-none overflow-hidden select-none">
+          {/* Clean Anime Cover Artwork at original proportions (native browser long-press / right-click enabled) */}
+          <div
+            className="w-full pointer-events-auto overflow-hidden select-auto"
+            style={{ WebkitTouchCallout: 'default', WebkitUserSelect: 'auto', userSelect: 'auto' }}
+          >
             <SmartAnimeCover
               anime={anime}
               studioName={studio?.name || 'Estudio'}
@@ -749,19 +752,26 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
               tamaño="original"
               priority={true}
               loading="eager"
-              className="w-full h-full object-cover object-[center_top] sm:object-[center_12%]"
+              naturalSize={true}
+              className="w-full h-auto block select-auto"
             />
           </div>
+        </div>
+      </div>
 
-          {/* Hero Content Overlay: stronger uniform fade covering buttons, synopsis, genres, title, and reaching strongly over the studio with a smooth feather */}
-          <div className="relative z-10 w-full px-3.5 sm:px-5 md:px-6 pb-2 sm:pb-2.5 md:pb-3 pt-4 sm:pt-5 pointer-events-auto">
-            <div className="absolute inset-x-0 bottom-0 -top-14 sm:-top-16 bg-[linear-gradient(to_top,rgba(9,5,20,0.9)_0%,rgba(9,5,20,0.84)_50%,rgba(9,5,20,0.72)_66%,rgba(9,5,20,0.46)_78%,rgba(9,5,20,0.22)_88%,rgba(9,5,20,0.07)_95%,transparent_100%)] pointer-events-none -z-10" />
-
-            <div className="flex flex-col justify-end space-y-1 sm:space-y-1.5 w-full max-w-2xl">
-              {/* 1. Studio / Studios above Title: no individual pill fade, positioned slightly closer above the title */}
-              <div className="mb-0.5 select-none">
+      {/* Content Container below the cover */}
+      <div className="relative max-w-5xl lg:max-w-6xl xl:max-w-7xl 2xl:max-w-[1600px] mx-auto px-3 sm:px-6 lg:px-8 pt-2.5 sm:pt-3.5 z-10">
+        <div className="space-y-3.5">
+          {/* Compact Anime Info Bubble Card (native browser text selection/copy enabled) */}
+          <div
+            style={{ WebkitUserSelect: 'text', userSelect: 'text', WebkitTouchCallout: 'default' }}
+            className="w-full max-w-xl sm:max-w-2xl bg-[#0e091b]/95 backdrop-blur-md border border-[#2b1747] rounded-2xl p-2.5 sm:p-3.5 shadow-xl shadow-black/60 select-text"
+          >
+            <div className="flex flex-col space-y-1 sm:space-y-1.5 w-full">
+              {/* 1. Studio / Studios above Title */}
+              <div>
                 {animeStudios.length > 0 ? (
-                  <div className="flex flex-wrap items-center gap-1.5 w-fit">
+                  <div className="flex flex-wrap items-center gap-1 w-fit">
                     {animeStudios.map((st, idx) => (
                       <React.Fragment key={st.id}>
                         <button
@@ -771,13 +781,13 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                               onSelectStudio(st.id);
                             }
                           }}
-                          className="inline-flex items-center w-fit font-mono text-[10.5px] sm:text-xs font-semibold text-[#c084fc] uppercase tracking-wider leading-tight hover:underline hover:text-purple-300 transition-colors cursor-pointer text-left drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]"
+                          className="inline-flex items-center w-fit font-mono text-[9px] sm:text-[10.5px] font-semibold text-[#c084fc] uppercase tracking-wider leading-tight hover:underline hover:text-purple-300 transition-colors cursor-pointer text-left select-text"
                           title={`Ver todas las portadas de ${st.name}`}
                         >
                           {st.name}
                         </button>
                         {idx < animeStudios.length - 1 && (
-                          <span className="text-neutral-300 font-mono text-[10.5px] sm:text-xs drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]">/</span>
+                          <span className="text-neutral-300 font-mono text-[9px] sm:text-[10.5px]">/</span>
                         )}
                       </React.Fragment>
                     ))}
@@ -790,31 +800,30 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                         onSelectStudio(studio.id);
                       }
                     }}
-                    className="inline-flex items-center w-fit font-mono text-[10.5px] sm:text-xs font-semibold text-[#c084fc] uppercase tracking-wider leading-tight hover:underline hover:text-purple-300 transition-colors cursor-pointer text-left drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]"
+                    className="inline-flex items-center w-fit font-mono text-[9px] sm:text-[10.5px] font-semibold text-[#c084fc] uppercase tracking-wider leading-tight hover:underline hover:text-purple-300 transition-colors cursor-pointer text-left select-text"
                     title={`Ver todas las portadas de ${studio.name}`}
                   >
                     {studio.name}
                   </button>
                 ) : (
-                  <span className="inline-flex items-center w-fit font-mono text-[10.5px] sm:text-xs font-semibold text-[#c084fc] uppercase tracking-wider leading-tight drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]">
+                  <span className="inline-flex items-center w-fit font-mono text-[9px] sm:text-[10.5px] font-semibold text-[#c084fc] uppercase tracking-wider leading-tight select-text">
                     ESTUDIO INDEPENDIENTE
                   </span>
                 )}
               </div>
 
-              {/* 2. Anime Title inside photo: strictly 1 single line, native text selection enabled for mobile long-press and PC drag */}
+              {/* 2. Anime Title */}
               <h1
                 style={{ WebkitUserSelect: 'text', userSelect: 'text' }}
-                className="text-base sm:text-xl md:text-2xl font-display font-bold text-white tracking-tight leading-snug drop-shadow truncate max-w-full select-text cursor-text"
+                className="text-[13.5px] sm:text-base md:text-lg font-display font-bold text-white tracking-tight leading-snug truncate max-w-full select-text cursor-text"
                 title={anime.name}
               >
                 {anime.name}
               </h1>
 
-              {/* 3. Genres inside photo: Single line showing all genres that fit cleanly at a glance */}
+              {/* 3. Genres: Single line showing all genres that fit cleanly */}
               {animeGenres.length > 0 && (
-                <div className="relative w-full select-none">
-                  {/* Hidden measurement row to calculate how many genres fit in 1 single line without clipping */}
+                <div className="relative w-full">
                   <div
                     ref={genresMeasureRef}
                     aria-hidden="true"
@@ -823,15 +832,14 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                     {animeGenres.map((genre) => (
                       <span
                         key={`measure-${genre.id}`}
-                        className="px-1.5 py-0.5 rounded-md border text-[8px] sm:text-[9px] font-mono uppercase tracking-wider shrink-0"
+                        className="px-1.5 py-[1px] rounded-md border text-[7.5px] sm:text-[8.5px] font-mono uppercase tracking-wider shrink-0"
                       >
                         {genre.name}
                       </span>
                     ))}
                   </div>
 
-                  {/* Visible genres at a glance on 1 line */}
-                  <div className="flex items-center gap-1 flex-nowrap overflow-hidden whitespace-nowrap max-w-full py-0.5">
+                  <div className="flex items-center gap-1 flex-nowrap overflow-hidden whitespace-nowrap max-w-full">
                     {visibleCoverGenres.map((genre) => (
                       <button
                         key={genre.id}
@@ -841,7 +849,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                             onSelectGenre(genre.id);
                           }
                         }}
-                        className="px-1.5 py-0.5 rounded-md bg-[#1a0f30]/85 hover:bg-purple-900/90 backdrop-blur-sm border border-purple-400/30 hover:border-purple-400/70 text-[8px] sm:text-[9px] font-mono text-purple-200 hover:text-white uppercase tracking-wider transition-colors cursor-pointer shrink-0"
+                        className="px-1.5 py-[1px] rounded-md bg-[#1a0f30]/90 hover:bg-purple-900/90 border border-purple-400/35 hover:border-purple-400/75 text-[7.5px] sm:text-[8.5px] font-mono text-purple-100 hover:text-white uppercase tracking-wider transition-colors cursor-pointer shrink-0 select-text"
                       >
                         {genre.name}
                       </button>
@@ -850,7 +858,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                 </div>
               )}
 
-              {/* 4. Synopsis: 2 lines preview; only shows "... ver más" when the synopsis overflows the 2-line preview */}
+              {/* 4. Synopsis: 2 lines preview + "... ver más" */}
               {anime.description && (
                 <div
                   onClick={() => {
@@ -858,30 +866,30 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                       setIsInfoOpen(true);
                     }
                   }}
-                  className={`relative max-w-lg select-none ${
+                  className={`relative max-w-xl select-text ${
                     isSynopsisOverflowing ? 'cursor-pointer group/syn' : ''
                   }`}
                   title={isSynopsisOverflowing ? 'Toca para ver la sinopsis completa' : undefined}
                 >
-                  {/* Hidden elements to accurately measure whether synopsis exceeds 2 lines */}
                   <p
                     ref={synopsisFullMeasureRef}
                     aria-hidden="true"
-                    className="invisible pointer-events-none absolute inset-x-0 top-0 -z-20 text-[11px] sm:text-xs font-sans leading-snug"
+                    className="invisible pointer-events-none absolute inset-x-0 top-0 -z-20 text-[10.5px] sm:text-[11.5px] font-sans leading-snug"
                   >
                     {anime.description}
                   </p>
                   <p
                     ref={synopsisClampMeasureRef}
                     aria-hidden="true"
-                    className="invisible pointer-events-none absolute inset-x-0 top-0 -z-20 text-[11px] sm:text-xs font-sans leading-snug line-clamp-2"
+                    className="invisible pointer-events-none absolute inset-x-0 top-0 -z-20 text-[10.5px] sm:text-[11.5px] font-sans leading-snug line-clamp-2"
                   >
                     {anime.description}
                   </p>
 
                   <p
-                    className={`text-[11px] sm:text-xs text-neutral-300/95 font-sans leading-snug line-clamp-2 drop-shadow ${
-                      isSynopsisOverflowing ? 'pr-14' : ''
+                    style={{ WebkitUserSelect: 'text', userSelect: 'text' }}
+                    className={`text-[10.5px] sm:text-[11.5px] text-neutral-200/95 font-sans leading-snug line-clamp-2 select-text ${
+                      isSynopsisOverflowing ? 'pr-12' : ''
                     }`}
                   >
                     {anime.description}
@@ -893,7 +901,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                         e.stopPropagation();
                         setIsInfoOpen(true);
                       }}
-                      className="absolute bottom-0 right-0 pl-4 bg-gradient-to-l from-[#090514]/90 via-[#090514]/80 to-transparent text-[11px] sm:text-xs font-sans font-bold text-purple-300 group-hover/syn:text-white transition-colors cursor-pointer leading-snug"
+                      className="absolute bottom-0 right-0 pl-3.5 bg-gradient-to-l from-[#0e091b] via-[#0e091b]/95 to-transparent text-[10.5px] sm:text-[11.5px] font-sans font-bold text-purple-300 group-hover/syn:text-white transition-colors cursor-pointer leading-snug"
                     >
                       ... <span className="underline">ver más</span>
                     </button>
@@ -901,12 +909,12 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                 </div>
               )}
 
-              {/* 5. Last Row: Year, Status, Rating, + (Mi Lista), Eye (Visto), and Download icon-only button positioned closer to the bottom edge */}
-              <div className="flex items-center gap-1.5 sm:gap-2 pt-0.5 flex-nowrap overflow-x-auto scrollbar-none whitespace-nowrap select-none max-w-full">
+              {/* 5. Bottom Row: Year, Status, Rating, + (Mi Lista), Eye (Visto), and Download circle button */}
+              <div className="flex items-center gap-1.5 pt-0.5 flex-nowrap overflow-x-auto scrollbar-none whitespace-nowrap max-w-full">
                 {/* Year */}
                 {anime.year && (
                   <div className="flex items-center justify-center shrink-0 pr-0.5">
-                    <span className="font-sans text-[11px] sm:text-xs font-extrabold text-white tracking-tight leading-none drop-shadow">
+                    <span className="font-sans text-[10.5px] sm:text-xs font-extrabold text-white tracking-tight leading-none select-text">
                       {normalizeAnimeYear(anime.year)}
                     </span>
                   </div>
@@ -914,16 +922,16 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
 
                 {/* Status Badge */}
                 <div className="shrink-0 flex items-center">
-                  <span className={`h-6 sm:h-7 px-1.5 sm:px-2 rounded-lg text-[9px] sm:text-[10px] font-sans font-bold tracking-tight border inline-flex items-center justify-center leading-none shadow-sm ${
+                  <span className={`h-5 sm:h-6 px-2 rounded-full text-[8.5px] sm:text-[9.5px] font-sans font-bold tracking-tight border inline-flex items-center justify-center leading-none shadow-sm select-text ${
                     isEmision 
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 shadow-emerald-500/10' 
-                      : 'bg-neutral-800/80 text-neutral-200 border-neutral-700/60 shadow-sm'
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/45 shadow-emerald-500/10' 
+                      : 'bg-neutral-800/85 text-neutral-200 border-neutral-700/70 shadow-sm'
                   }`}>
                     {statusLabel}
                   </span>
                 </div>
 
-                {/* Rating Box Button */}
+                {/* Rating Pill Button */}
                 <div className="shrink-0">
                   <button
                     type="button"
@@ -935,21 +943,21 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                       setIsRatingOpen(true);
                     }}
                     title="Calificar anime"
-                    className="h-7 sm:h-8 px-2 sm:px-2.5 rounded-xl bg-[#161226]/90 hover:bg-[#201938] border border-[#2e214d] hover:border-purple-500/60 backdrop-blur-md shadow-sm inline-flex items-center gap-1 cursor-pointer active:scale-95 transition-all duration-200 group shrink-0"
+                    className="h-6 sm:h-7 px-2 rounded-full bg-[#1a152b] hover:bg-[#241c3d] border border-[#342654] hover:border-purple-500/60 shadow-sm inline-flex items-center gap-1 cursor-pointer active:scale-95 transition-all duration-200 group shrink-0"
                   >
                     <Star 
-                      className={`h-3 w-3 sm:h-3.5 sm:w-3.5 transition-colors shrink-0 ${
-                        ratingStats.userVote ? 'text-amber-400 fill-amber-400' : 'text-neutral-300 group-hover:text-white'
+                      className={`h-2.5 w-2.5 sm:h-3 sm:w-3 transition-colors shrink-0 ${
+                        ratingStats.userVote ? 'text-amber-400 fill-amber-400' : 'text-neutral-200 group-hover:text-white'
                       }`} 
                       strokeWidth={1.8} 
                     />
-                    <span className="font-mono text-[9.5px] sm:text-[10.5px] font-bold text-white leading-none">
+                    <span className="font-mono text-[9px] sm:text-[10px] font-bold text-white leading-none">
                       {ratingStats.average > 0 ? ratingStats.average.toFixed(1) : '0.0'}
                     </span>
                   </button>
                 </div>
 
-                {/* Mi Lista Button: ONLY "+" / Check Icon */}
+                {/* Mi Lista Button: Circle "+" / Check Icon */}
                 {onToggleMyList && (
                   <div className="shrink-0">
                     <button
@@ -963,22 +971,22 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                       }}
                       title={isSaved ? "Quitar de mi lista" : "Agregar a mi lista"}
                       aria-label={isSaved ? "Quitar de mi lista" : "Agregar a mi lista"}
-                      className={`h-7 w-7 sm:h-8 sm:w-8 inline-flex items-center justify-center rounded-xl backdrop-blur-md transition-all duration-200 cursor-pointer shadow-sm active:scale-95 shrink-0 ${
+                      className={`h-6 w-6 sm:h-7 sm:w-7 inline-flex items-center justify-center rounded-full transition-all duration-200 cursor-pointer shadow-sm active:scale-95 shrink-0 ${
                         isSaved
-                          ? 'bg-[#1b152e]/90 text-white border border-[#442e6d] shadow-[0_0_10px_rgba(168,85,247,0.2)]'
-                          : 'bg-[#161226]/90 hover:bg-[#201938] text-white border border-[#2e214d] hover:border-purple-500/50'
+                          ? 'bg-[#21183a] text-white border border-[#513783] shadow-[0_0_10px_rgba(168,85,247,0.2)]'
+                          : 'bg-[#1a152b] hover:bg-[#241c3d] text-white border border-[#342654] hover:border-purple-500/50'
                       }`}
                     >
                       {isSaved ? (
-                        <Check className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-emerald-400 stroke-[3] shrink-0" />
+                        <Check className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-emerald-400 stroke-[3] shrink-0" />
                       ) : (
-                        <Plus className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-white stroke-[2.5] shrink-0" />
+                        <Plus className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-white stroke-[2.5] shrink-0" />
                       )}
                     </button>
                   </div>
                 )}
 
-                {/* Visto Button: ONLY Eye Icon */}
+                {/* Visto Button: Circle Eye Icon */}
                 <div className="shrink-0">
                   <button
                     type="button"
@@ -995,21 +1003,21 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                     }}
                     title={(isWatchedProp !== undefined ? isWatchedProp : isWatched) ? "Marcar como no visto" : "Marcar como visto"}
                     aria-label={(isWatchedProp !== undefined ? isWatchedProp : isWatched) ? "Marcar como no visto" : "Marcar como visto"}
-                    className={`h-7 w-7 sm:h-8 sm:w-8 inline-flex items-center justify-center rounded-xl backdrop-blur-md transition-all duration-200 cursor-pointer shadow-sm active:scale-95 shrink-0 ${
+                    className={`h-6 w-6 sm:h-7 sm:w-7 inline-flex items-center justify-center rounded-full transition-all duration-200 cursor-pointer shadow-sm active:scale-95 shrink-0 ${
                       (isWatchedProp !== undefined ? isWatchedProp : isWatched)
-                        ? 'bg-[#1e1537]/90 text-purple-200 border border-purple-500/60 shadow-[0_0_10px_rgba(168,85,247,0.25)]'
-                        : 'bg-[#161226]/90 hover:bg-[#201938] text-white border border-[#2e214d] hover:border-purple-500/50'
+                        ? 'bg-[#22173d] text-purple-200 border border-purple-500/60 shadow-[0_0_10px_rgba(168,85,247,0.25)]'
+                        : 'bg-[#1a152b] hover:bg-[#241c3d] text-white border border-[#342654] hover:border-purple-500/50'
                     }`}
                   >
                     {(isWatchedProp !== undefined ? isWatchedProp : isWatched) ? (
-                      <Eye className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-purple-400 stroke-[2] shrink-0" />
+                      <Eye className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-purple-400 stroke-[2] shrink-0" />
                     ) : (
-                      <EyeOff className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-neutral-300 stroke-[2] shrink-0" />
+                      <EyeOff className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-neutral-300 stroke-[2] shrink-0" />
                     )}
                   </button>
                 </div>
 
-                {/* Download Button: Direct Download by default */}
+                {/* Download Button: Circle */}
                 {!isUpcoming && (
                   <div className="shrink-0">
                     <a
@@ -1027,21 +1035,15 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                           onDownload(anime.id);
                         }
                       }}
-                      className="h-7 w-7 sm:h-8 sm:w-8 inline-flex items-center justify-center rounded-xl bg-[#ff3366] hover:bg-[#ff1f57] text-white transition-all duration-200 shadow-md shadow-[#ff3366]/35 active:scale-95 cursor-pointer shrink-0"
+                      className="h-6 w-6 sm:h-7 sm:w-7 inline-flex items-center justify-center rounded-full bg-[#ff2d63] hover:bg-[#ff1954] text-white transition-all duration-200 shadow-md shadow-[#ff2d63]/35 active:scale-95 cursor-pointer shrink-0"
                     >
-                      <Download className="h-3.5 w-3.5 sm:h-4 sm:w-4 stroke-[2.5] shrink-0" />
+                      <Download className="h-3 w-3 sm:h-3.5 sm:w-3.5 stroke-[2.5] shrink-0" />
                     </a>
                   </div>
                 )}
               </div>
             </div>
           </div>
-        </div>
-      </div>
-
-      {/* Content Container below the cover */}
-      <div className="relative max-w-5xl lg:max-w-6xl xl:max-w-7xl 2xl:max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 pt-4 sm:pt-5 z-10">
-        <div className="space-y-4">
             {/* Crunchyroll-style Anime Rating Modal Window */}
             <AnimeRatingModal
               isOpen={isRatingOpen}
