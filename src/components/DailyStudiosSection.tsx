@@ -7,7 +7,7 @@ import React, { useMemo } from 'react';
 import { Studio, Anime } from '../types';
 import HorizontalSectionRow from './HorizontalSectionRow';
 import { Building2 } from 'lucide-react';
-import { getFallbackSvg, portadaUrl, prefetchAnime, SmartAnimeCover, useInView200 } from '../utils/imageFallback';
+import { getFallbackSvg, globalImageCache, portadaUrl, prefetchAnime, SmartAnimeCover, useInView2000 } from '../utils/imageFallback';
 import { getAnimeRatingStats } from '../utils/ratingManager';
 
 interface DailyStudiosSectionProps {
@@ -17,8 +17,45 @@ interface DailyStudiosSectionProps {
 }
 
 function StudioImageCircle({ studio, firstAnime }: { studio: Studio; firstAnime: Anime | null }) {
-  const { ref, isInView } = useInView200(false);
-  const [loaded, setLoaded] = React.useState(false);
+  const studioImgUrl = studio.image ? portadaUrl(studio.image, 'estudio') : '';
+  const initialCached = Boolean(studioImgUrl && (studioImgUrl.startsWith('data:') || globalImageCache.has(studioImgUrl)));
+
+  const [skipFade] = React.useState<boolean>(initialCached);
+  const [loaded, setLoaded] = React.useState<boolean>(initialCached);
+  const [placeholderDone, setPlaceholderDone] = React.useState<boolean>(initialCached);
+  const { ref, isInView } = useInView2000(initialCached);
+  const imgRef = React.useRef<HTMLImageElement | null>(null);
+  const decodedRef = React.useRef<string>('');
+  const mountedRef = React.useRef<boolean>(true);
+
+  React.useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (!loaded || placeholderDone) return;
+    const t = setTimeout(() => setPlaceholderDone(true), 220);
+    return () => clearTimeout(t);
+  }, [loaded, placeholderDone]);
+
+  const revealStudioImage = async () => {
+    if (!studioImgUrl || decodedRef.current === studioImgUrl) return;
+    decodedRef.current = studioImgUrl;
+    const el = imgRef.current;
+    if (el && typeof el.decode === 'function') {
+      try {
+        await el.decode();
+      } catch {}
+    }
+    if (!mountedRef.current) return;
+    globalImageCache.add(studioImgUrl);
+    requestAnimationFrame(() => {
+      if (mountedRef.current) setLoaded(true);
+    });
+  };
 
   if (!studio.image && firstAnime) {
     return (
@@ -36,24 +73,43 @@ function StudioImageCircle({ studio, firstAnime }: { studio: Studio; firstAnime:
   }
 
   if (studio.image) {
+    const showPlaceholder = !skipFade && !placeholderDone;
     return (
-      <div ref={ref} className="w-full h-full relative rounded-full overflow-hidden bg-neutral-800">
-        {!loaded && <div className="absolute inset-0 bg-neutral-800 pointer-events-none" />}
+      <div
+        ref={ref}
+        className={`w-full h-full relative rounded-full overflow-hidden ${showPlaceholder ? 'bg-dark-bg' : ''}`}
+      >
+        {showPlaceholder && (
+          <div className="absolute inset-0 bg-[#a855f7]/15 animate-pulse pointer-events-none" />
+        )}
         {isInView && (
           <img
-            src={portadaUrl(studio.image, 'estudio')}
+            ref={imgRef}
+            src={studioImgUrl}
             alt={studio.name}
             loading="lazy"
             decoding="async"
             width={270}
             height={270}
-            onLoad={() => setLoaded(true)}
-            className={`w-full h-full object-cover rounded-full drop-shadow-[0_4px_12px_rgba(0,0,0,0.6)] transition-all duration-300 group-hover:scale-110 ${
-              loaded ? 'opacity-100' : 'opacity-0'
-            }`}
+            onLoad={() => {
+              if (skipFade) {
+                setLoaded(true);
+                setPlaceholderDone(true);
+              } else {
+                revealStudioImage();
+              }
+            }}
+            className={
+              skipFade
+                ? 'w-full h-full object-cover rounded-full drop-shadow-[0_4px_12px_rgba(0,0,0,0.6)] transition-transform duration-200 ease-out group-hover:scale-110'
+                : `w-full h-full object-cover rounded-full drop-shadow-[0_4px_12px_rgba(0,0,0,0.6)] transition-[opacity,transform] duration-200 ease-out group-hover:scale-110 ${
+                    loaded ? 'opacity-100' : 'opacity-0'
+                  }`
+            }
             onError={(e) => {
               e.currentTarget.src = getFallbackSvg(studio.name);
               setLoaded(true);
+              setPlaceholderDone(true);
             }}
           />
         )}

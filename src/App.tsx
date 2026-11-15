@@ -62,6 +62,7 @@ import { getRecommendedAnimes } from './utils/recommendationManager';
 
 const AdminPanel = React.lazy(() => import('./components/AdminPanel'));
 import { SmartAnimeCover, portadaUrl, processImageSrc, globalImageCache, preloadAllAnimes, preloadAnimeCover, getFallbackSvg, startPrioritizedAppLoading, prefetchAnime, prefetchCatalogPage } from './utils/imageFallback';
+import { startCatalogIdlePreload } from './lib/coverCache';
 import { normalizeEpisodesList } from './utils/episodeUtils';
 import { enforceEpisodesRotation } from './utils/episodeRotation';
 import { getAnimeRatingStats } from './utils/ratingManager';
@@ -2047,6 +2048,53 @@ export default function App() {
       setCatalogSearchVisibleCount(24);
     }
   }, [deferredCatalogSearchQuery, selectedStudioId, selectedGenreIds, selectedYear, selectedStatus, selectedRating, sortBy]);
+
+  const catalogPreloadCandidates = useMemo(() => {
+    if (isCatalogSearchOpen) {
+      return catalogSearchSectionAnimes.slice(0, catalogSearchVisibleCount + 24);
+    }
+    const seen = new Set<string>();
+    const combined: Anime[] = [];
+    const addList = (list: Anime[]) => {
+      for (const a of list) {
+        if (a?.id && !seen.has(a.id)) {
+          seen.add(a.id);
+          combined.push(a);
+        }
+      }
+    };
+    addList(recommendedAnimes);
+    addList(latestCatalogAnimes);
+    addList(top10Animes);
+    addList(previousMonthPopularAnimes);
+    addList(upcomingSectionAnimes);
+    addList(myListSectionAnimes);
+    addList(catalogSectionAnimes.slice(0, 60));
+    return combined;
+  }, [
+    isCatalogSearchOpen,
+    catalogSearchSectionAnimes,
+    catalogSearchVisibleCount,
+    recommendedAnimes,
+    latestCatalogAnimes,
+    top10Animes,
+    previousMonthPopularAnimes,
+    upcomingSectionAnimes,
+    myListSectionAnimes,
+    catalogSectionAnimes,
+  ]);
+
+  // Precarga en segundo plano cuando el navegador esté libre; cancela al salir del catálogo
+  useEffect(() => {
+    if (loading || currentPage !== 'home' || catalogPreloadCandidates.length === 0) {
+      return;
+    }
+    const controller = new AbortController();
+    startCatalogIdlePreload(catalogPreloadCandidates, controller.signal).catch(() => {});
+    return () => {
+      controller.abort();
+    };
+  }, [loading, currentPage, catalogPreloadCandidates]);
 
   const totalCatalogPages = useMemo(() => {
     return Math.max(1, Math.ceil(sortedAnimes.length / ITEMS_PER_PAGE));

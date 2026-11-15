@@ -682,7 +682,6 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
               priority={true}
               loading="eager"
               naturalSize={true}
-              saveFullToCache={true}
               className="w-full h-auto block select-auto"
             />
           </div>

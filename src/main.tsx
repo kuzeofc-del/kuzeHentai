@@ -28,6 +28,15 @@ if (typeof window !== 'undefined') {
   if (navigator.storage && typeof navigator.storage.persist === 'function') {
     navigator.storage.persist().catch(() => {});
   }
+  try {
+    if ('indexedDB' in window && window.indexedDB && typeof window.indexedDB.deleteDatabase === 'function') {
+      const deleteReq = window.indexedDB.deleteDatabase('kh_portadas_cache_v1');
+      deleteReq.onerror = () => {};
+      deleteReq.onblocked = () => {};
+    }
+  } catch {
+    // Ignore cleanup errors in restricted environments
+  }
 }
 
 createRoot(document.getElementById('root')!).render(

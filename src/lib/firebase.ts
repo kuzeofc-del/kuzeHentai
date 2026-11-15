@@ -42,6 +42,7 @@ import {
   getDocFromServer,
   getDocsFromServer,
   deleteField,
+  documentId,
   Firestore,
   CollectionReference
 } from "firebase/firestore";
@@ -105,7 +106,7 @@ if (isFirebaseConfigured && firebaseConfig) {
       localCache: canUseIndexedDb
         ? persistentLocalCache({
             tabManager: persistentMultipleTabManager(),
-            cacheSizeBytes: 100 * 1024 * 1024 // 100 MB
+            cacheSizeBytes: 300 * 1024 * 1024 // 300 MB
           })
         : memoryLocalCache(),
       experimentalAutoDetectLongPolling: true,
@@ -227,7 +228,8 @@ export {
   getDocsFromCache,
   getDocFromServer,
   getDocsFromServer,
-  deleteField
+  deleteField,
+  documentId
 };
 
 export interface CommentItem {

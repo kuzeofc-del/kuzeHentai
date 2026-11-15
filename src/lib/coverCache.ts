@@ -1,279 +1,35 @@
-import { db, isFirebaseConfigured, doc, getDoc, getDocFromServer } from './firebase';
+import {
+  db,
+  isFirebaseConfigured,
+  doc,
+  collection,
+  query,
+  where,
+  documentId,
+  getDocFromCache,
+  getDocFromServer,
+  getDocsFromServer,
+} from './firebase';
 import { Anime } from '../types';
 
-export interface CachedPortadaRecord {
-  id: string;
+export interface PortadaData {
+  imagen: string;
   portadaVersion: number;
-  thumb?: string; // WebP thumbnail (~40 KB, max width 300px)
-  full?: string;  // Full original base64 cover (saved only when user opens AnimeDetail)
-  updatedAt: number;
 }
 
-const DB_NAME = 'kh_portadas_cache_v1';
-const DB_VERSION = 1;
-const STORE_NAME = 'portadas';
+const SERVER_BATCH_WINDOW_MS = 50;
+const FIRESTORE_IN_QUERY_MAX = 30;
 
-let idbInstancePromise: Promise<IDBDatabase | null> | null = null;
-let idbUnavailable = false;
+// In-memory session cache for covers already read in this session
+const memoryPortadaCache = new Map<string, PortadaData>();
 
-// Session in-memory caches for instant 0ms hits and graceful fallback when IndexedDB fails/is full
-const memoryThumbCache = new Map<string, { version: number; dataUrl: string }>();
-const memoryFullCache = new Map<string, { version: number; dataUrl: string }>();
-const inFlightPortadaFetches = new Map<string, Promise<{ imagen: string; portadaVersion: number } | null>>();
-const inFlightThumbGenerations = new Map<string, Promise<string>>();
+// Batched server fetch queue (~50ms collection window, chunks of up to 30 IDs)
+const inFlightBatchedRequests = new Map<string, Promise<PortadaData | null>>();
+const pendingQueueResolvers = new Map<string, (result: PortadaData | null) => void>();
+let batchTimer: ReturnType<typeof setTimeout> | null = null;
 
-function openPortadasDb(): Promise<IDBDatabase | null> {
-  if (idbUnavailable || typeof window === 'undefined' || !('indexedDB' in window) || !window.indexedDB) {
-    return Promise.resolve(null);
-  }
-  if (idbInstancePromise) return idbInstancePromise;
-
-  idbInstancePromise = new Promise((resolve) => {
-    try {
-      const req = window.indexedDB.open(DB_NAME, DB_VERSION);
-      req.onupgradeneeded = () => {
-        try {
-          const database = req.result;
-          if (!database.objectStoreNames.contains(STORE_NAME)) {
-            database.createObjectStore(STORE_NAME, { keyPath: 'id' });
-          }
-        } catch {
-          // Ignore upgrade errors
-        }
-      };
-      req.onsuccess = () => {
-        const database = req.result;
-        database.onversionchange = () => {
-          try {
-            database.close();
-          } catch {}
-          idbInstancePromise = null;
-        };
-        resolve(database);
-      };
-      req.onerror = () => {
-        idbUnavailable = true;
-        idbInstancePromise = null;
-        resolve(null);
-      };
-      req.onblocked = () => {
-        resolve(null);
-      };
-    } catch {
-      idbUnavailable = true;
-      idbInstancePromise = null;
-      resolve(null);
-    }
-  });
-
-  return idbInstancePromise;
-}
-
-export async function getPortadaFromIdb(id: string): Promise<CachedPortadaRecord | null> {
-  if (!id || idbUnavailable) return null;
-  try {
-    const database = await openPortadasDb();
-    if (!database) return null;
-    return await new Promise<CachedPortadaRecord | null>((resolve) => {
-      try {
-        const tx = database.transaction(STORE_NAME, 'readonly');
-        const store = tx.objectStore(STORE_NAME);
-        const req = store.get(id);
-        req.onsuccess = () => resolve((req.result as CachedPortadaRecord) || null);
-        req.onerror = () => resolve(null);
-      } catch {
-        resolve(null);
-      }
-    });
-  } catch {
-    return null;
-  }
-}
-
-export async function putPortadaInIdb(record: CachedPortadaRecord): Promise<void> {
-  if (!record?.id || idbUnavailable) return;
-  try {
-    const database = await openPortadasDb();
-    if (!database) return;
-    await new Promise<void>((resolve) => {
-      try {
-        const tx = database.transaction(STORE_NAME, 'readwrite');
-        const store = tx.objectStore(STORE_NAME);
-        const req = store.put(record);
-        req.onsuccess = () => resolve();
-        req.onerror = () => resolve();
-        tx.onabort = () => resolve();
-        tx.onerror = () => resolve();
-      } catch {
-        resolve();
-      }
-    });
-  } catch {
-    // Graceful degradation on QuotaExceededError or restricted storage
-  }
-}
-
-export async function deletePortadaFromIdb(id: string): Promise<void> {
-  if (!id) return;
-  memoryThumbCache.delete(id);
-  memoryFullCache.delete(id);
-  if (idbUnavailable) return;
-  try {
-    const database = await openPortadasDb();
-    if (!database) return;
-    await new Promise<void>((resolve) => {
-      try {
-        const tx = database.transaction(STORE_NAME, 'readwrite');
-        const store = tx.objectStore(STORE_NAME);
-        const req = store.delete(id);
-        req.onsuccess = () => resolve();
-        req.onerror = () => resolve();
-      } catch {
-        resolve();
-      }
-    });
-  } catch {}
-}
-
-function estimateDataUrlBytes(dataUrl: string): number {
-  const commaIdx = dataUrl.indexOf(',');
-  const payloadLen = commaIdx !== -1 ? dataUrl.length - commaIdx - 1 : dataUrl.length;
-  return Math.round(payloadLen * 0.75);
-}
-
-/**
- * Generates a WebP thumbnail (~40 KB, max width ~300px) using a browser canvas.
- */
-export function generateWebpThumbnail(
-  sourceDataUrl: string,
-  maxWidth: number = 300,
-  targetMaxBytes: number = 42000
-): Promise<string> {
-  if (!sourceDataUrl || typeof window === 'undefined' || typeof document === 'undefined') {
-    return Promise.resolve(sourceDataUrl);
-  }
-
-  const cacheKey = `${sourceDataUrl.length}:${sourceDataUrl.slice(0, 40)}:${sourceDataUrl.slice(-32)}`;
-  const existingGen = inFlightThumbGenerations.get(cacheKey);
-  if (existingGen) return existingGen;
-
-  const task = new Promise<string>((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      try {
-        const origW = img.naturalWidth || img.width || maxWidth;
-        const origH = img.naturalHeight || img.height || Math.round(maxWidth * 1.5);
-        const targetW = Math.max(1, Math.min(maxWidth, origW));
-        const targetH = Math.max(1, Math.round((origH * targetW) / origW));
-
-        const canvas = document.createElement('canvas');
-        canvas.width = targetW;
-        canvas.height = targetH;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          resolve(sourceDataUrl);
-          return;
-        }
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(img, 0, 0, targetW, targetH);
-
-        const mime = 'image/webp';
-        let quality = 0.78;
-        let out = canvas.toDataURL(mime, quality);
-
-        // Fallback to JPEG if browser lacks WebP canvas encoding
-        const formatToUse = out.startsWith('data:image/webp') ? mime : 'image/jpeg';
-        if (formatToUse !== mime) {
-          out = canvas.toDataURL(formatToUse, quality);
-        }
-
-        while (estimateDataUrlBytes(out) > targetMaxBytes && quality > 0.32) {
-          quality = Math.max(0.3, +(quality - 0.1).toFixed(2));
-          out = canvas.toDataURL(formatToUse, quality);
-        }
-
-        resolve(out || sourceDataUrl);
-      } catch {
-        resolve(sourceDataUrl);
-      }
-    };
-    img.onerror = () => resolve(sourceDataUrl);
-    img.src = sourceDataUrl;
-  }).finally(() => {
-    inFlightThumbGenerations.delete(cacheKey);
-  });
-
-  inFlightThumbGenerations.set(cacheKey, task);
-  return task;
-}
-
-/**
- * Fetches full base64 portada from Firestore `portadas/{id}` with deduplication.
- */
-export async function fetchPortadaFromFirestore(
-  animeId: string,
-  expectedVersion?: number
-): Promise<{ imagen: string; portadaVersion: number } | null> {
-  if (!animeId || !db || !isFirebaseConfigured) return null;
-
-  const flightKey = `${animeId}:${expectedVersion ?? 'any'}`;
-  const existing = inFlightPortadaFetches.get(flightKey);
-  if (existing) return existing;
-
-  const promise = (async () => {
-    try {
-      const ref = doc(db, 'portadas', animeId);
-      let snap = await getDoc(ref).catch(() => null);
-      let data = snap && snap.exists() ? snap.data() : null;
-      let snapVersion = typeof data?.portadaVersion === 'number' ? data.portadaVersion : 1;
-
-      // If expectedVersion is newer than cached doc or doc not found locally, try server
-      if (
-        (!data || !data.imagen || (expectedVersion !== undefined && snapVersion < expectedVersion)) &&
-        (typeof navigator === 'undefined' || navigator.onLine !== false)
-      ) {
-        const srvSnap = await getDocFromServer(ref).catch(() => null);
-        if (srvSnap && srvSnap.exists()) {
-          snap = srvSnap;
-          data = srvSnap.data();
-          snapVersion = typeof data?.portadaVersion === 'number' ? data.portadaVersion : 1;
-        }
-      }
-
-      if (data && typeof data.imagen === 'string' && data.imagen.startsWith('data:image')) {
-        return {
-          imagen: data.imagen,
-          portadaVersion: snapVersion
-        };
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  })().finally(() => {
-    inFlightPortadaFetches.delete(flightKey);
-  });
-
-  inFlightPortadaFetches.set(flightKey, promise);
-  return promise;
-}
-
-export function getSyncCachedPortada(
-  animeId: string | undefined,
-  mode: 'thumb' | 'full',
-  expectedVersion: number
-): string | null {
-  if (!animeId) return null;
-  if (mode === 'thumb') {
-    const hit = memoryThumbCache.get(animeId);
-    if (hit && hit.version === expectedVersion) return hit.dataUrl;
-  } else {
-    const hit = memoryFullCache.get(animeId);
-    if (hit && hit.version === expectedVersion) return hit.dataUrl;
-  }
-  return null;
-}
+// Direct single-doc deduplication (used by AdminPanel edit/export)
+const inFlightDirectRequests = new Map<string, Promise<PortadaData | null>>();
 
 export function isExternalHttpCover(anime: Partial<Anime>): boolean {
   const img = (anime.image || '').trim();
@@ -281,169 +37,423 @@ export function isExternalHttpCover(anime: Partial<Anime>): boolean {
   return /^https?:\/\//i.test(img) || /^https?:\/\//i.test(cUrl);
 }
 
-/**
- * Resolves a base64 / Firestore `portadas/{id}` cover:
- * - Compares `anime.portadaVersion` against IndexedDB record.
- * - Uses IndexedDB directly if version matches (0 Firestore reads).
- * - For `mode === 'thumb'`, generates ~40KB WebP (<=300px) via canvas and caches it in IndexedDB.
- * - For `mode === 'full'`, persists `full` in IndexedDB ONLY when `saveFull === true` (when user opens the anime).
- * - Falls back seamlessly to Firestore + memory if IndexedDB fails or is full.
- */
-export async function resolveAnimeCoverBase64(options: {
-  anime: Partial<Anime>;
-  mode: 'thumb' | 'full';
-  saveFull?: boolean;
-}): Promise<string | null> {
-  const { anime, mode, saveFull = false } = options;
-  const animeId = anime.id ? String(anime.id) : '';
-  const expectedVersion = typeof anime.portadaVersion === 'number' ? anime.portadaVersion : 1;
-
-  // 0. Fast in-memory check
-  if (animeId) {
-    const syncHit = getSyncCachedPortada(animeId, mode, expectedVersion);
-    if (syncHit) {
-      if (mode === 'full' && saveFull) {
-        // Ensure full is also persisted in IndexedDB if user opened the anime
-        getPortadaFromIdb(animeId).then(async (rec) => {
-          if (!rec || rec.portadaVersion !== expectedVersion || !rec.full) {
-            const thumb = rec && rec.portadaVersion === expectedVersion && rec.thumb
-              ? rec.thumb
-              : await generateWebpThumbnail(syncHit);
-            memoryThumbCache.set(animeId, { version: expectedVersion, dataUrl: thumb });
-            await putPortadaInIdb({
-              id: animeId,
-              portadaVersion: expectedVersion,
-              thumb,
-              full: syncHit,
-              updatedAt: Date.now()
-            });
-          }
-        }).catch(() => {});
-      }
-      return syncHit;
-    }
+export function getSyncCachedPortada(
+  animeId: string | undefined,
+  expectedVersion?: number
+): string | null {
+  if (!animeId) return null;
+  const hit = memoryPortadaCache.get(animeId);
+  if (!hit) return null;
+  if (expectedVersion === undefined || hit.portadaVersion === expectedVersion) {
+    return hit.imagen;
   }
-
-  // 1. Check IndexedDB first
-  const existingRecord = animeId ? await getPortadaFromIdb(animeId) : null;
-  if (existingRecord && existingRecord.portadaVersion === expectedVersion) {
-    if (mode === 'thumb') {
-      if (existingRecord.thumb) {
-        memoryThumbCache.set(animeId, { version: expectedVersion, dataUrl: existingRecord.thumb });
-        return existingRecord.thumb;
-      }
-      if (existingRecord.full) {
-        const thumb = await generateWebpThumbnail(existingRecord.full);
-        memoryThumbCache.set(animeId, { version: expectedVersion, dataUrl: thumb });
-        await putPortadaInIdb({
-          ...existingRecord,
-          thumb,
-          updatedAt: Date.now()
-        });
-        return thumb;
-      }
-    } else if (mode === 'full' && existingRecord.full) {
-      memoryFullCache.set(animeId, { version: expectedVersion, dataUrl: existingRecord.full });
-      return existingRecord.full;
-    }
-  }
-
-  // 2. Source base64 either inline (before migration) or from Firestore `portadas/{id}`
-  let fullImagen: string | null = null;
-  let resolvedVersion = expectedVersion;
-
-  if (anime.coverData && anime.coverData.startsWith('data:image')) {
-    fullImagen = anime.coverData;
-  } else if (anime.image && anime.image.startsWith('data:image')) {
-    fullImagen = anime.image;
-  } else if (animeId) {
-    const fsData = await fetchPortadaFromFirestore(animeId, expectedVersion);
-    if (fsData?.imagen) {
-      fullImagen = fsData.imagen;
-      resolvedVersion = fsData.portadaVersion;
-    }
-  }
-
-  if (!fullImagen) {
-    return null;
-  }
-
-  // 3. Process and store according to mode
-  if (mode === 'thumb') {
-    const thumb = await generateWebpThumbnail(fullImagen);
-    if (animeId) {
-      memoryThumbCache.set(animeId, { version: resolvedVersion, dataUrl: thumb });
-      const preservedFull =
-        existingRecord && existingRecord.portadaVersion === resolvedVersion && existingRecord.full
-          ? existingRecord.full
-          : undefined;
-      await putPortadaInIdb({
-        id: animeId,
-        portadaVersion: resolvedVersion,
-        thumb,
-        ...(preservedFull ? { full: preservedFull } : {}),
-        updatedAt: Date.now()
-      });
-    }
-    return thumb;
-  }
-
-  // mode === 'full'
-  if (animeId) {
-    memoryFullCache.set(animeId, { version: resolvedVersion, dataUrl: fullImagen });
-
-    if (saveFull) {
-      // Save full + thumb into IndexedDB because user explicitly opened this anime
-      const thumb =
-        existingRecord && existingRecord.portadaVersion === resolvedVersion && existingRecord.thumb
-          ? existingRecord.thumb
-          : await generateWebpThumbnail(fullImagen);
-      memoryThumbCache.set(animeId, { version: resolvedVersion, dataUrl: thumb });
-      await putPortadaInIdb({
-        id: animeId,
-        portadaVersion: resolvedVersion,
-        thumb,
-        full: fullImagen,
-        updatedAt: Date.now()
-      });
-    } else if (!existingRecord || existingRecord.portadaVersion !== resolvedVersion || !existingRecord.thumb) {
-      // In carousel: do NOT save `full` in IndexedDB, only save lightweight `thumb` if missing/outdated
-      generateWebpThumbnail(fullImagen)
-        .then((thumb) => {
-          memoryThumbCache.set(animeId, { version: resolvedVersion, dataUrl: thumb });
-          return putPortadaInIdb({
-            id: animeId,
-            portadaVersion: resolvedVersion,
-            thumb,
-            updatedAt: Date.now()
-          });
-        })
-        .catch(() => {});
-    }
-  }
-
-  return fullImagen;
+  return null;
 }
 
-/**
- * Updates IndexedDB + memory caches immediately after an admin edits or creates a cover.
- */
-export async function upsertPortadaCache(
+export function upsertPortadaMemoryCache(
   animeId: string,
-  fullBase64: string,
+  imagen: string,
   portadaVersion: number
-): Promise<void> {
-  if (!animeId || !fullBase64 || !fullBase64.startsWith('data:image')) return;
-  try {
-    memoryFullCache.set(animeId, { version: portadaVersion, dataUrl: fullBase64 });
-    const thumb = await generateWebpThumbnail(fullBase64);
-    memoryThumbCache.set(animeId, { version: portadaVersion, dataUrl: thumb });
-    await putPortadaInIdb({
-      id: animeId,
-      portadaVersion,
-      thumb,
-      full: fullBase64,
-      updatedAt: Date.now()
-    });
-  } catch {}
+): void {
+  if (!animeId || !imagen || !imagen.startsWith('data:image')) return;
+  memoryPortadaCache.set(animeId, {
+    imagen,
+    portadaVersion: typeof portadaVersion === 'number' ? portadaVersion : 1,
+  });
 }
+
+export function deletePortadaMemoryCache(animeId: string): void {
+  if (!animeId) return;
+  memoryPortadaCache.delete(animeId);
+}
+
+async function flushServerBatchQueue(): Promise<void> {
+  batchTimer = null;
+  if (pendingQueueResolvers.size === 0) return;
+
+  const entries = Array.from(pendingQueueResolvers.entries());
+  pendingQueueResolvers.clear();
+
+  if (!db || !isFirebaseConfigured) {
+    for (const [id, resolve] of entries) {
+      inFlightBatchedRequests.delete(id);
+      resolve(null);
+    }
+    return;
+  }
+
+  // Split into chunks of max 30 IDs (Firestore `in` query limit)
+  const chunks: Array<Array<[string, (result: PortadaData | null) => void]>> = [];
+  for (let i = 0; i < entries.length; i += FIRESTORE_IN_QUERY_MAX) {
+    chunks.push(entries.slice(i, i + FIRESTORE_IN_QUERY_MAX));
+  }
+
+  await Promise.all(
+    chunks.map(async (chunkEntries) => {
+      const ids = chunkEntries.map(([id]) => id);
+      const foundMap = new Map<string, PortadaData>();
+
+      try {
+        const q = query(
+          collection(db, 'portadas'),
+          where(documentId(), 'in', ids)
+        );
+        const snap = await getDocsFromServer(q);
+
+        snap.docs.forEach((docSnap) => {
+          const data = docSnap.data();
+          if (data && typeof data.imagen === 'string' && data.imagen.startsWith('data:image')) {
+            const portadaVersion =
+              typeof data.portadaVersion === 'number' ? data.portadaVersion : 1;
+            const entry: PortadaData = {
+              imagen: data.imagen,
+              portadaVersion,
+            };
+            foundMap.set(docSnap.id, entry);
+            memoryPortadaCache.set(docSnap.id, entry);
+          }
+        });
+      } catch {
+        // Network / offline error — handled by caller's stale-cache fallback
+      } finally {
+        for (const [id, resolve] of chunkEntries) {
+          inFlightBatchedRequests.delete(id);
+          resolve(foundMap.get(id) || null);
+        }
+      }
+    })
+  );
+}
+
+/**
+ * Collects cover IDs over a ~50ms window and queries `portadas` from server
+ * in batches of up to 30 IDs (`where(documentId(), 'in', ids)`).
+ * Results are automatically stored in Firestore's persistentLocalCache.
+ */
+function requestPortadaFromServerBatched(animeId: string): Promise<PortadaData | null> {
+  const existing = inFlightBatchedRequests.get(animeId);
+  if (existing) return existing;
+
+  const promise = new Promise<PortadaData | null>((resolve) => {
+    pendingQueueResolvers.set(animeId, resolve);
+    if (!batchTimer) {
+      batchTimer = setTimeout(() => {
+        flushServerBatchQueue().catch(() => {});
+      }, SERVER_BATCH_WINDOW_MS);
+    }
+  });
+
+  inFlightBatchedRequests.set(animeId, promise);
+  return promise;
+}
+
+/**
+ * Cache-first base64 cover resolution for catalog/cards/detail:
+ * a) Memory Map (session hits) & Firestore persistent cache (`getDocFromCache`) matching `portadaVersion`.
+ * b) If missing in cache or version mismatch, batched server fetch (~50ms, max 30 IDs).
+ * c) If offline or server fails and a cached copy exists, returns cached copy even with mismatched version.
+ * Always uses the original image without resizing or recompression.
+ */
+export async function resolveAnimeCoverBase64(
+  anime: Partial<Anime>
+): Promise<string | null> {
+  const animeId = anime.id ? String(anime.id) : '';
+  const hasExplicitVersion = typeof anime.portadaVersion === 'number';
+  const expectedVersion = hasExplicitVersion ? (anime.portadaVersion as number) : 1;
+
+  // Inline base64 support (if any document still contains inline base64)
+  if (anime.coverData && anime.coverData.startsWith('data:image')) {
+    if (animeId) upsertPortadaMemoryCache(animeId, anime.coverData, expectedVersion);
+    return anime.coverData;
+  }
+  if (anime.image && anime.image.startsWith('data:image')) {
+    if (animeId) upsertPortadaMemoryCache(animeId, anime.image, expectedVersion);
+    return anime.image;
+  }
+
+  if (!animeId) return null;
+
+  // d) In-memory Map hit check for current session
+  const memHit = memoryPortadaCache.get(animeId);
+  if (memHit && (!hasExplicitVersion || memHit.portadaVersion === expectedVersion)) {
+    return memHit.imagen;
+  }
+
+  if (!db || !isFirebaseConfigured) {
+    return memHit ? memHit.imagen : null;
+  }
+
+  // a) Try Firestore local persistent cache first
+  let staleCached: PortadaData | null = null;
+  try {
+    const cacheSnap = await getDocFromCache(doc(db, 'portadas', animeId));
+    if (cacheSnap.exists()) {
+      const data = cacheSnap.data();
+      if (data && typeof data.imagen === 'string' && data.imagen.startsWith('data:image')) {
+        const cachedVersion =
+          typeof data.portadaVersion === 'number' ? data.portadaVersion : 1;
+        const cachedEntry: PortadaData = {
+          imagen: data.imagen,
+          portadaVersion: cachedVersion,
+        };
+        if (!hasExplicitVersion || cachedVersion === expectedVersion) {
+          memoryPortadaCache.set(animeId, cachedEntry);
+          return cachedEntry.imagen;
+        }
+        staleCached = cachedEntry;
+      }
+    }
+  } catch {
+    // Document not yet in Firestore persistent cache
+  }
+
+  // c) Offline fallback: show cached copy even if version differs
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return staleCached?.imagen || memHit?.imagen || null;
+  }
+
+  // b) Missing from cache or version mismatch -> batched server fetch
+  const serverResult = await requestPortadaFromServerBatched(animeId);
+  if (serverResult?.imagen) {
+    return serverResult.imagen;
+  }
+
+  // c) If server failed/returned nothing (e.g. offline/network hiccup), fall back to cached copy
+  return staleCached?.imagen || memHit?.imagen || null;
+}
+
+/**
+ * Direct cache-first fetch of `portadas/{id}` for AdminPanel (edit cover / backup export).
+ */
+export async function fetchPortadaFromFirestore(
+  animeId: string,
+  expectedVersion?: number
+): Promise<PortadaData | null> {
+  if (!animeId) return null;
+
+  const hasExplicitVersion = typeof expectedVersion === 'number';
+  const memHit = memoryPortadaCache.get(animeId);
+  if (memHit && (!hasExplicitVersion || memHit.portadaVersion === expectedVersion)) {
+    return memHit;
+  }
+
+  if (!db || !isFirebaseConfigured) {
+    return memHit || null;
+  }
+
+  const flightKey = `${animeId}:${expectedVersion ?? 'any'}`;
+  const existing = inFlightDirectRequests.get(flightKey);
+  if (existing) return existing;
+
+  const promise = (async (): Promise<PortadaData | null> => {
+    let staleCached: PortadaData | null = null;
+
+    try {
+      const cacheSnap = await getDocFromCache(doc(db, 'portadas', animeId));
+      if (cacheSnap.exists()) {
+        const data = cacheSnap.data();
+        if (data && typeof data.imagen === 'string' && data.imagen.startsWith('data:image')) {
+          const cachedVersion =
+            typeof data.portadaVersion === 'number' ? data.portadaVersion : 1;
+          const cachedEntry: PortadaData = {
+            imagen: data.imagen,
+            portadaVersion: cachedVersion,
+          };
+          if (!hasExplicitVersion || cachedVersion === expectedVersion) {
+            memoryPortadaCache.set(animeId, cachedEntry);
+            return cachedEntry;
+          }
+          staleCached = cachedEntry;
+        }
+      }
+    } catch {
+      // Cache miss
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return staleCached || memHit || null;
+    }
+
+    try {
+      const srvSnap = await getDocFromServer(doc(db, 'portadas', animeId));
+      if (srvSnap.exists()) {
+        const data = srvSnap.data();
+        if (data && typeof data.imagen === 'string' && data.imagen.startsWith('data:image')) {
+          const srvVersion =
+            typeof data.portadaVersion === 'number' ? data.portadaVersion : 1;
+          const entry: PortadaData = {
+            imagen: data.imagen,
+            portadaVersion: srvVersion,
+          };
+          memoryPortadaCache.set(animeId, entry);
+          return entry;
+        }
+      }
+    } catch {
+      // Server unavailable
+    }
+
+    return staleCached || memHit || null;
+  })().finally(() => {
+    inFlightDirectRequests.delete(flightKey);
+  });
+
+  inFlightDirectRequests.set(flightKey, promise);
+  return promise;
+}
+
+const PRELOAD_BATCH_LIMIT = 24;
+let isPreloadBatchRunning = false;
+
+function waitForBrowserIdle(signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    let idleId: number | null = null;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+
+    const cleanup = () => {
+      signal.removeEventListener('abort', onAbort);
+      if (
+        idleId !== null &&
+        typeof window !== 'undefined' &&
+        typeof (window as Window & { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback === 'function'
+      ) {
+        try {
+          (window as Window & { cancelIdleCallback: (id: number) => void }).cancelIdleCallback(idleId);
+        } catch {}
+      }
+      if (timerId !== null) {
+        clearTimeout(timerId);
+      }
+    };
+
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(ok);
+    };
+
+    const onAbort = () => finish(false);
+    signal.addEventListener('abort', onAbort, { once: true });
+
+    const win = typeof window !== 'undefined'
+      ? (window as Window & {
+          requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+        })
+      : null;
+
+    if (win && typeof win.requestIdleCallback === 'function') {
+      idleId = win.requestIdleCallback(() => finish(!signal.aborted), { timeout: 1500 });
+    } else {
+      timerId = setTimeout(() => finish(!signal.aborted), 180);
+    }
+  });
+}
+
+/**
+ * Background idle preloader for catalog cards:
+ * - Waits for browser idle (`requestIdleCallback` with `setTimeout` fallback)
+ * - Finds up to 24 uncached base64 covers from `catalogAnimes`
+ * - Fetches 1 batch at a time using the same 30-ID `in` batch queue
+ * - Cancels immediately via `AbortSignal` when user leaves the catalog
+ */
+export async function startCatalogIdlePreload(
+  catalogAnimes: Partial<Anime>[],
+  signal: AbortSignal
+): Promise<void> {
+  if (!db || !isFirebaseConfigured || catalogAnimes.length === 0) return;
+
+  // Never run more than 1 preload batch at a time
+  if (isPreloadBatchRunning) return;
+
+  while (!signal.aborted) {
+    const canProceed = await waitForBrowserIdle(signal);
+    if (!canProceed || signal.aborted) return;
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return;
+    }
+
+    if (isPreloadBatchRunning) return;
+
+    const uncachedIds: string[] = [];
+    const seenIds = new Set<string>();
+
+    for (let i = 0; i < catalogAnimes.length && uncachedIds.length < PRELOAD_BATCH_LIMIT; i += 10) {
+      if (signal.aborted) return;
+      const slice = catalogAnimes.slice(i, i + 10);
+
+      const batchCheck = await Promise.all(
+        slice.map(async (anime) => {
+          if (signal.aborted) return null;
+          const id = anime.id ? String(anime.id) : '';
+          if (!id || seenIds.has(id)) return null;
+          seenIds.add(id);
+
+          if (isExternalHttpCover(anime)) return null;
+          if (
+            (anime.coverData && anime.coverData.startsWith('data:image')) ||
+            (anime.image && anime.image.startsWith('data:image'))
+          ) {
+            return null;
+          }
+
+          const hasExplicitVersion = typeof anime.portadaVersion === 'number';
+          const expectedVersion = hasExplicitVersion ? (anime.portadaVersion as number) : 1;
+
+          // Already in session memory Map
+          const memHit = memoryPortadaCache.get(id);
+          if (memHit && (!hasExplicitVersion || memHit.portadaVersion === expectedVersion)) {
+            return null;
+          }
+
+          // Check Firestore persistent cache; warm memory Map if already cached
+          try {
+            const cacheSnap = await getDocFromCache(doc(db, 'portadas', id));
+            if (cacheSnap.exists()) {
+              const data = cacheSnap.data();
+              if (data && typeof data.imagen === 'string' && data.imagen.startsWith('data:image')) {
+                const cachedVersion =
+                  typeof data.portadaVersion === 'number' ? data.portadaVersion : 1;
+                if (!hasExplicitVersion || cachedVersion === expectedVersion) {
+                  memoryPortadaCache.set(id, {
+                    imagen: data.imagen,
+                    portadaVersion: cachedVersion,
+                  });
+                  return null;
+                }
+              }
+            }
+          } catch {
+            // Not in cache yet -> candidate for background preload
+          }
+
+          return id;
+        })
+      );
+
+      for (const id of batchCheck) {
+        if (id && uncachedIds.length < PRELOAD_BATCH_LIMIT) {
+          uncachedIds.push(id);
+        }
+      }
+    }
+
+    if (signal.aborted || uncachedIds.length === 0) {
+      return;
+    }
+
+    // Fetch strictly 1 preload batch of <= 24 IDs using the 30-ID batched query queue
+    isPreloadBatchRunning = true;
+    try {
+      await Promise.all(uncachedIds.map((id) => requestPortadaFromServerBatched(id)));
+    } catch {
+      return;
+    } finally {
+      isPreloadBatchRunning = false;
+    }
+  }
+}
+
