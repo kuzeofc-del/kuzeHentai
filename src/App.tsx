@@ -878,12 +878,13 @@ export default function App() {
       }
     });
 
-    // Safety timeout so an offline device with an empty first-run cache never remains stuck on loading
+    // Safety timeout: fast if offline with empty cache, generous if online first-time sync is still downloading
+    const isDeviceOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
     const offlineSafetyTimer = setTimeout(() => {
       if (!isCancelled) {
         setLoading(false);
       }
-    }, 2500);
+    }, isDeviceOffline ? 2500 : 30000);
 
     // Recover scroll/animation cleanly when returning to the browser tab
     const handleAppResume = () => {
