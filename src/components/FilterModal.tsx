@@ -409,12 +409,12 @@ function FilterModal({
                         >
                           {studio.image && (
                             <img
-                              src={portadaUrl(studio.image, 'mini')}
+                              src={portadaUrl(studio.image, 'estudio')}
                               alt=""
                               loading="lazy"
                               decoding="async"
-                              width={150}
-                              height={150}
+                              width={270}
+                              height={270}
                               className="w-3.5 h-3.5 rounded-full object-cover shrink-0"
                               onError={e => {
                                 (e.target as HTMLElement).style.display = 'none';

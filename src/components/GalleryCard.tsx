@@ -55,8 +55,8 @@ function GalleryCard({ anime, studios, onClick, index, isNewEpisodesMode, episod
             src={episodeCoverImage}
             alt={`${anime.name} - Ep ${lastEpisodeNumber}`}
             loading="lazy"
-            width={300}
-            height={450}
+            width={360}
+            height={540}
             decoding="async"
             className="w-full h-full object-cover"
             referrerPolicy="no-referrer"
@@ -67,11 +67,11 @@ function GalleryCard({ anime, studios, onClick, index, isNewEpisodesMode, episod
             anime={anime}
             studioName={studioName}
             alt={anime.name}
-            tamaño="vineta"
+            tamaño="tarjeta23"
             loading="lazy"
             priority={false}
-            width={300}
-            height={450}
+            width={360}
+            height={540}
             className="w-full h-full object-cover"
           />
         )}

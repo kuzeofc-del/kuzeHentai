@@ -1,26 +1,43 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Anime } from '../types';
 
-export type PortadaSize = 'original' | 'horizontal' | 'episodio' | 'vineta' | 'mini';
+export type PortadaSize =
+  | 'original'
+  | 'tarjeta23'
+  | 'nuevos'
+  | 'horizontal'
+  | 'episodio'
+  | 'estudio'
+  | 'fondo'
+  | 'admin'
+  | 'mini';
 
-const CLOUDINARY_TRANSFORM_WIDTH: Record<Exclude<PortadaSize, 'original'>, number> = {
-  horizontal: 600,
-  episodio: 400,
-  vineta: 300,
-  mini: 150,
+const CLOUDINARY_TRANSFORM_STRING: Record<Exclude<PortadaSize, 'original'>, string> = {
+  tarjeta23: 'ar_2:3,c_lfill,g_center,w_360,q_70,f_auto',
+  nuevos: 'ar_16:9,c_lfill,g_north,w_900,q_auto:good,f_auto',
+  horizontal: 'ar_16:9,c_lfill,g_north,w_780,q_auto:good,f_auto',
+  episodio: 'ar_16:9,c_lfill,g_center,w_500,q_auto:good,f_auto',
+  estudio: 'ar_1:1,c_lfill,g_center,w_270,q_auto:good,f_auto',
+  fondo: 'w_400,q_auto:eco,f_auto',
+  admin: 'w_600,q_auto:good,f_auto',
+  mini: 'w_150,q_auto:good,f_auto',
 };
 
 const PORTADA_DIMENSIONS: Record<PortadaSize, { width: number; height: number }> = {
   original: { width: 800, height: 1200 },
-  horizontal: { width: 600, height: 338 },
-  episodio: { width: 400, height: 225 },
-  vineta: { width: 300, height: 450 },
+  tarjeta23: { width: 360, height: 540 },
+  nuevos: { width: 900, height: 506 },
+  horizontal: { width: 780, height: 439 },
+  episodio: { width: 500, height: 281 },
+  estudio: { width: 270, height: 270 },
+  fondo: { width: 400, height: 600 },
+  admin: { width: 600, height: 900 },
   mini: { width: 150, height: 225 },
 };
 
 /**
- * Inserts lightweight Cloudinary width + q_auto,f_auto transformations right after /upload/
- * without cropping. Only transforms res.cloudinary.com URLs containing /upload/ that don't
+ * Inserts Cloudinary transformations right after /upload/.
+ * Only transforms res.cloudinary.com URLs containing /upload/ that don't
  * already have transformations. For 'original', returns the URL completely unchanged.
  */
 export function portadaUrl(url: string | undefined | null, tamaño: PortadaSize = 'original'): string {
@@ -59,11 +76,10 @@ export function portadaUrl(url: string | undefined | null, tamaño: PortadaSize 
     return url;
   }
 
-  const targetWidth = CLOUDINARY_TRANSFORM_WIDTH[tamaño];
-  if (!targetWidth) return url;
+  const transform = CLOUDINARY_TRANSFORM_STRING[tamaño];
+  if (!transform) return url;
 
-  const transformation = `w_${targetWidth},q_auto,f_auto/`;
-  return trimmed.slice(0, uploadIdx + uploadMarker.length) + transformation + afterUpload;
+  return trimmed.slice(0, uploadIdx + uploadMarker.length) + `${transform}/` + afterUpload;
 }
 
 // In-memory lookup map for active session

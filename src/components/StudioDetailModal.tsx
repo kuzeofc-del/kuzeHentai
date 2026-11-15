@@ -354,12 +354,12 @@ export default function StudioDetailModal({
           <div className="w-28 h-28 xs:w-32 xs:h-32 sm:w-44 sm:h-44 md:w-52 md:h-52 rounded-full overflow-hidden shadow-2xl shrink-0 flex items-center justify-center relative select-none bg-purple-950/20">
             {studioCover ? (
               <img
-                src={portadaUrl(studioCover, 'mini')}
+                src={portadaUrl(studioCover, 'estudio')}
                 alt={studio.name}
                 loading="lazy"
                 decoding="async"
-                width={150}
-                height={150}
+                width={270}
+                height={270}
                 className="w-full h-full object-cover rounded-full drop-shadow-[0_10px_25px_rgba(0,0,0,0.6)] transition-transform duration-300 hover:scale-105"
                 onError={(e) => {
                   e.currentTarget.src = getFallbackSvg(studio.name);

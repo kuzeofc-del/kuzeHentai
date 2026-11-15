@@ -706,7 +706,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
         <div className="absolute inset-0 w-full h-full pointer-events-none z-0 overflow-hidden select-none">
           {imageSrc && (
             <img
-              src={portadaUrl(imageSrc, 'episodio')}
+              src={portadaUrl(imageSrc, 'fondo')}
               alt={anime.name}
               loading="eager"
               decoding="async"
@@ -760,14 +760,14 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
       </div>
 
       {/* Content Container below the cover */}
-      <div className="relative max-w-5xl lg:max-w-6xl xl:max-w-7xl 2xl:max-w-[1600px] mx-auto px-3 sm:px-6 lg:px-8 pt-2.5 sm:pt-3.5 z-10">
-        <div className="space-y-3.5">
-          {/* Compact Anime Info Bubble Card (native browser text selection/copy enabled) */}
+      <div className="relative max-w-5xl lg:max-w-6xl xl:max-w-7xl 2xl:max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 pt-3 sm:pt-4 z-10">
+        <div className="space-y-4">
+          {/* Anime Info directly on the page (native browser text selection/copy enabled) */}
           <div
             style={{ WebkitUserSelect: 'text', userSelect: 'text', WebkitTouchCallout: 'default' }}
-            className="w-full max-w-xl sm:max-w-2xl bg-[#0e091b]/95 backdrop-blur-md border border-[#2b1747] rounded-2xl p-2.5 sm:p-3.5 shadow-xl shadow-black/60 select-text"
+            className="w-full max-w-[640px] sm:max-w-[720px] select-text"
           >
-            <div className="flex flex-col space-y-1 sm:space-y-1.5 w-full">
+            <div className="flex flex-col space-y-1.5 sm:space-y-2 w-full">
               {/* 1. Studio / Studios above Title */}
               <div>
                 {animeStudios.length > 0 ? (
@@ -781,13 +781,13 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                               onSelectStudio(st.id);
                             }
                           }}
-                          className="inline-flex items-center w-fit font-mono text-[9px] sm:text-[10.5px] font-semibold text-[#c084fc] uppercase tracking-wider leading-tight hover:underline hover:text-purple-300 transition-colors cursor-pointer text-left select-text"
+                          className="inline-flex items-center w-fit font-mono text-[10px] sm:text-[11.5px] font-semibold text-[#c084fc] uppercase tracking-wider leading-tight hover:underline hover:text-purple-300 transition-colors cursor-pointer text-left select-text"
                           title={`Ver todas las portadas de ${st.name}`}
                         >
                           {st.name}
                         </button>
                         {idx < animeStudios.length - 1 && (
-                          <span className="text-neutral-300 font-mono text-[9px] sm:text-[10.5px]">/</span>
+                          <span className="text-neutral-300 font-mono text-[10px] sm:text-[11.5px]">/</span>
                         )}
                       </React.Fragment>
                     ))}
@@ -800,13 +800,13 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                         onSelectStudio(studio.id);
                       }
                     }}
-                    className="inline-flex items-center w-fit font-mono text-[9px] sm:text-[10.5px] font-semibold text-[#c084fc] uppercase tracking-wider leading-tight hover:underline hover:text-purple-300 transition-colors cursor-pointer text-left select-text"
+                    className="inline-flex items-center w-fit font-mono text-[10px] sm:text-[11.5px] font-semibold text-[#c084fc] uppercase tracking-wider leading-tight hover:underline hover:text-purple-300 transition-colors cursor-pointer text-left select-text"
                     title={`Ver todas las portadas de ${studio.name}`}
                   >
                     {studio.name}
                   </button>
                 ) : (
-                  <span className="inline-flex items-center w-fit font-mono text-[9px] sm:text-[10.5px] font-semibold text-[#c084fc] uppercase tracking-wider leading-tight select-text">
+                  <span className="inline-flex items-center w-fit font-mono text-[10px] sm:text-[11.5px] font-semibold text-[#c084fc] uppercase tracking-wider leading-tight select-text">
                     ESTUDIO INDEPENDIENTE
                   </span>
                 )}
@@ -815,7 +815,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
               {/* 2. Anime Title */}
               <h1
                 style={{ WebkitUserSelect: 'text', userSelect: 'text' }}
-                className="text-[13.5px] sm:text-base md:text-lg font-display font-bold text-white tracking-tight leading-snug truncate max-w-full select-text cursor-text"
+                className="text-[15px] sm:text-[18px] md:text-[20px] font-display font-bold text-white tracking-tight leading-snug truncate max-w-full select-text cursor-text"
                 title={anime.name}
               >
                 {anime.name}
@@ -827,19 +827,19 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                   <div
                     ref={genresMeasureRef}
                     aria-hidden="true"
-                    className="invisible pointer-events-none h-0 overflow-hidden flex items-center gap-1 flex-nowrap whitespace-nowrap w-full"
+                    className="invisible pointer-events-none h-0 overflow-hidden flex items-center gap-1.5 flex-nowrap whitespace-nowrap w-full"
                   >
                     {animeGenres.map((genre) => (
                       <span
                         key={`measure-${genre.id}`}
-                        className="px-1.5 py-[1px] rounded-md border text-[7.5px] sm:text-[8.5px] font-mono uppercase tracking-wider shrink-0"
+                        className="px-[7px] py-[2px] rounded-md border text-[8.5px] sm:text-[9.5px] font-mono uppercase tracking-wider shrink-0"
                       >
                         {genre.name}
                       </span>
                     ))}
                   </div>
 
-                  <div className="flex items-center gap-1 flex-nowrap overflow-hidden whitespace-nowrap max-w-full">
+                  <div className="flex items-center gap-1.5 flex-nowrap overflow-hidden whitespace-nowrap max-w-full">
                     {visibleCoverGenres.map((genre) => (
                       <button
                         key={genre.id}
@@ -849,7 +849,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                             onSelectGenre(genre.id);
                           }
                         }}
-                        className="px-1.5 py-[1px] rounded-md bg-[#1a0f30]/90 hover:bg-purple-900/90 border border-purple-400/35 hover:border-purple-400/75 text-[7.5px] sm:text-[8.5px] font-mono text-purple-100 hover:text-white uppercase tracking-wider transition-colors cursor-pointer shrink-0 select-text"
+                        className="px-[7px] py-[2px] rounded-md bg-[#1a0f30]/90 hover:bg-purple-900/90 border border-purple-400/35 hover:border-purple-400/75 text-[8.5px] sm:text-[9.5px] font-mono text-purple-100 hover:text-white uppercase tracking-wider transition-colors cursor-pointer shrink-0 select-text"
                       >
                         {genre.name}
                       </button>
@@ -866,7 +866,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                       setIsInfoOpen(true);
                     }
                   }}
-                  className={`relative max-w-xl select-text ${
+                  className={`relative max-w-[640px] select-text ${
                     isSynopsisOverflowing ? 'cursor-pointer group/syn' : ''
                   }`}
                   title={isSynopsisOverflowing ? 'Toca para ver la sinopsis completa' : undefined}
@@ -874,22 +874,22 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                   <p
                     ref={synopsisFullMeasureRef}
                     aria-hidden="true"
-                    className="invisible pointer-events-none absolute inset-x-0 top-0 -z-20 text-[10.5px] sm:text-[11.5px] font-sans leading-snug"
+                    className="invisible pointer-events-none absolute inset-x-0 top-0 -z-20 text-[11.5px] sm:text-[13px] font-sans leading-snug"
                   >
                     {anime.description}
                   </p>
                   <p
                     ref={synopsisClampMeasureRef}
                     aria-hidden="true"
-                    className="invisible pointer-events-none absolute inset-x-0 top-0 -z-20 text-[10.5px] sm:text-[11.5px] font-sans leading-snug line-clamp-2"
+                    className="invisible pointer-events-none absolute inset-x-0 top-0 -z-20 text-[11.5px] sm:text-[13px] font-sans leading-snug line-clamp-2"
                   >
                     {anime.description}
                   </p>
 
                   <p
                     style={{ WebkitUserSelect: 'text', userSelect: 'text' }}
-                    className={`text-[10.5px] sm:text-[11.5px] text-neutral-200/95 font-sans leading-snug line-clamp-2 select-text ${
-                      isSynopsisOverflowing ? 'pr-12' : ''
+                    className={`text-[11.5px] sm:text-[13px] text-neutral-200/95 font-sans leading-snug line-clamp-2 select-text ${
+                      isSynopsisOverflowing ? 'pr-14' : ''
                     }`}
                   >
                     {anime.description}
@@ -901,7 +901,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                         e.stopPropagation();
                         setIsInfoOpen(true);
                       }}
-                      className="absolute bottom-0 right-0 pl-3.5 bg-gradient-to-l from-[#0e091b] via-[#0e091b]/95 to-transparent text-[10.5px] sm:text-[11.5px] font-sans font-bold text-purple-300 group-hover/syn:text-white transition-colors cursor-pointer leading-snug"
+                      className={`absolute bottom-0 right-0 pl-4 bg-gradient-to-l ${appTheme === 'black' ? 'from-black via-black/85' : 'from-[#09060f]/95 via-[#09060f]/80'} to-transparent text-[11.5px] sm:text-[13px] font-sans font-bold text-purple-300 group-hover/syn:text-white transition-colors cursor-pointer leading-snug`}
                     >
                       ... <span className="underline">ver más</span>
                     </button>
@@ -910,11 +910,11 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
               )}
 
               {/* 5. Bottom Row: Year, Status, Rating, + (Mi Lista), Eye (Visto), and Download circle button */}
-              <div className="flex items-center gap-1.5 pt-0.5 flex-nowrap overflow-x-auto scrollbar-none whitespace-nowrap max-w-full">
+              <div className="flex items-center gap-2 pt-1 flex-nowrap overflow-x-auto scrollbar-none whitespace-nowrap max-w-full">
                 {/* Year */}
                 {anime.year && (
                   <div className="flex items-center justify-center shrink-0 pr-0.5">
-                    <span className="font-sans text-[10.5px] sm:text-xs font-extrabold text-white tracking-tight leading-none select-text">
+                    <span className="font-sans text-[12px] sm:text-[13.5px] font-extrabold text-white tracking-tight leading-none select-text">
                       {normalizeAnimeYear(anime.year)}
                     </span>
                   </div>
@@ -922,7 +922,7 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
 
                 {/* Status Badge */}
                 <div className="shrink-0 flex items-center">
-                  <span className={`h-5 sm:h-6 px-2 rounded-full text-[8.5px] sm:text-[9.5px] font-sans font-bold tracking-tight border inline-flex items-center justify-center leading-none shadow-sm select-text ${
+                  <span className={`h-[22px] sm:h-[26px] px-2.5 rounded-full text-[9.5px] sm:text-[10.5px] font-sans font-bold tracking-tight border inline-flex items-center justify-center leading-none shadow-sm select-text ${
                     isEmision 
                       ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/45 shadow-emerald-500/10' 
                       : 'bg-neutral-800/85 text-neutral-200 border-neutral-700/70 shadow-sm'
@@ -943,15 +943,15 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                       setIsRatingOpen(true);
                     }}
                     title="Calificar anime"
-                    className="h-6 sm:h-7 px-2 rounded-full bg-[#1a152b] hover:bg-[#241c3d] border border-[#342654] hover:border-purple-500/60 shadow-sm inline-flex items-center gap-1 cursor-pointer active:scale-95 transition-all duration-200 group shrink-0"
+                    className="h-[27px] sm:h-[31px] px-2.5 rounded-full bg-[#1a152b] hover:bg-[#241c3d] border border-[#342654] hover:border-purple-500/60 shadow-sm inline-flex items-center gap-1 cursor-pointer active:scale-95 transition-all duration-200 group shrink-0"
                   >
                     <Star 
-                      className={`h-2.5 w-2.5 sm:h-3 sm:w-3 transition-colors shrink-0 ${
+                      className={`h-3 w-3 sm:h-3.5 sm:w-3.5 transition-colors shrink-0 ${
                         ratingStats.userVote ? 'text-amber-400 fill-amber-400' : 'text-neutral-200 group-hover:text-white'
                       }`} 
                       strokeWidth={1.8} 
                     />
-                    <span className="font-mono text-[9px] sm:text-[10px] font-bold text-white leading-none">
+                    <span className="font-mono text-[10px] sm:text-[11px] font-bold text-white leading-none">
                       {ratingStats.average > 0 ? ratingStats.average.toFixed(1) : '0.0'}
                     </span>
                   </button>
@@ -971,16 +971,16 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                       }}
                       title={isSaved ? "Quitar de mi lista" : "Agregar a mi lista"}
                       aria-label={isSaved ? "Quitar de mi lista" : "Agregar a mi lista"}
-                      className={`h-6 w-6 sm:h-7 sm:w-7 inline-flex items-center justify-center rounded-full transition-all duration-200 cursor-pointer shadow-sm active:scale-95 shrink-0 ${
+                      className={`h-[27px] w-[27px] sm:h-[31px] sm:w-[31px] inline-flex items-center justify-center rounded-full transition-all duration-200 cursor-pointer shadow-sm active:scale-95 shrink-0 ${
                         isSaved
                           ? 'bg-[#21183a] text-white border border-[#513783] shadow-[0_0_10px_rgba(168,85,247,0.2)]'
                           : 'bg-[#1a152b] hover:bg-[#241c3d] text-white border border-[#342654] hover:border-purple-500/50'
                       }`}
                     >
                       {isSaved ? (
-                        <Check className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-emerald-400 stroke-[3] shrink-0" />
+                        <Check className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-emerald-400 stroke-[3] shrink-0" />
                       ) : (
-                        <Plus className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-white stroke-[2.5] shrink-0" />
+                        <Plus className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-white stroke-[2.5] shrink-0" />
                       )}
                     </button>
                   </div>
@@ -1003,16 +1003,16 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                     }}
                     title={(isWatchedProp !== undefined ? isWatchedProp : isWatched) ? "Marcar como no visto" : "Marcar como visto"}
                     aria-label={(isWatchedProp !== undefined ? isWatchedProp : isWatched) ? "Marcar como no visto" : "Marcar como visto"}
-                    className={`h-6 w-6 sm:h-7 sm:w-7 inline-flex items-center justify-center rounded-full transition-all duration-200 cursor-pointer shadow-sm active:scale-95 shrink-0 ${
+                    className={`h-[27px] w-[27px] sm:h-[31px] sm:w-[31px] inline-flex items-center justify-center rounded-full transition-all duration-200 cursor-pointer shadow-sm active:scale-95 shrink-0 ${
                       (isWatchedProp !== undefined ? isWatchedProp : isWatched)
                         ? 'bg-[#22173d] text-purple-200 border border-purple-500/60 shadow-[0_0_10px_rgba(168,85,247,0.25)]'
                         : 'bg-[#1a152b] hover:bg-[#241c3d] text-white border border-[#342654] hover:border-purple-500/50'
                     }`}
                   >
                     {(isWatchedProp !== undefined ? isWatchedProp : isWatched) ? (
-                      <Eye className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-purple-400 stroke-[2] shrink-0" />
+                      <Eye className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-purple-400 stroke-[2] shrink-0" />
                     ) : (
-                      <EyeOff className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-neutral-300 stroke-[2] shrink-0" />
+                      <EyeOff className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-neutral-300 stroke-[2] shrink-0" />
                     )}
                   </button>
                 </div>
@@ -1035,9 +1035,9 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                           onDownload(anime.id);
                         }
                       }}
-                      className="h-6 w-6 sm:h-7 sm:w-7 inline-flex items-center justify-center rounded-full bg-[#ff2d63] hover:bg-[#ff1954] text-white transition-all duration-200 shadow-md shadow-[#ff2d63]/35 active:scale-95 cursor-pointer shrink-0"
+                      className="h-[27px] w-[27px] sm:h-[31px] sm:w-[31px] inline-flex items-center justify-center rounded-full bg-[#ff2d63] hover:bg-[#ff1954] text-white transition-all duration-200 shadow-md shadow-[#ff2d63]/35 active:scale-95 cursor-pointer shrink-0"
                     >
-                      <Download className="h-3 w-3 sm:h-3.5 sm:w-3.5 stroke-[2.5] shrink-0" />
+                      <Download className="h-3.5 w-3.5 sm:h-4 sm:w-4 stroke-[2.5] shrink-0" />
                     </a>
                   </div>
                 )}
@@ -1170,8 +1170,8 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                             alt={`Episodio ${ep.number}`}
                             loading="lazy"
                             decoding="async"
-                            width={400}
-                            height={225}
+                            width={500}
+                            height={281}
                             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                             onError={(e) => {
                               e.currentTarget.src = getFallbackSvg(anime.name);
@@ -1248,11 +1248,11 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                                   anime={relAnime}
                                   studioName={relStudio}
                                   alt={relAnime.name}
-                                  tamaño="vineta"
+                                  tamaño="tarjeta23"
                                   loading="lazy"
                                   priority={false}
-                                  width={300}
-                                  height={450}
+                                  width={360}
+                                  height={540}
                                   className="w-full h-full object-cover"
                                 />
                                 {/* Pequeña parte del nombre abajo en la portada */}
@@ -1313,11 +1313,11 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                                 anime={rec}
                                 studioName={recStudio}
                                 alt={rec.name}
-                                tamaño="vineta"
+                                tamaño="tarjeta23"
                                 loading="lazy"
                                 priority={false}
-                                width={300}
-                                height={450}
+                                width={360}
+                                height={540}
                                 className="w-full h-full object-cover"
                               />
                               {/* Subtle title overlay at bottom */}
@@ -1550,8 +1550,8 @@ export default function AnimeDetail({ anime, studios, genres, animes, allAnimes,
                                       alt={`Episodio ${ep.number}`}
                                       loading="lazy"
                                       decoding="async"
-                                      width={400}
-                                      height={225}
+                                      width={500}
+                                      height={281}
                                       className="w-full h-full object-cover"
                                       onError={(e) => {
                                         e.currentTarget.src = getFallbackSvg(anime.name);

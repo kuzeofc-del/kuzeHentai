@@ -121,9 +121,9 @@ export default function AnimeRatingModal({
                 anime={anime}
                 studioName={studioName}
                 alt={anime.name}
-                tamaño="vineta"
-                width={300}
-                height={450}
+                tamaño="tarjeta23"
+                width={360}
+                height={540}
                 className="w-full h-full object-cover"
               />
             </div>

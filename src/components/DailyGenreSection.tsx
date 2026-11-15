@@ -171,9 +171,9 @@ export default function DailyGenreSection({
               tamaño="horizontal"
               loading="lazy"
               priority={false}
-              width={600}
-              height={338}
-              className="w-full h-full object-cover object-[center_25%]"
+              width={780}
+              height={439}
+              className="w-full h-full object-cover object-top"
             />
 
             {/* Difuminado suave abajo en el título */}

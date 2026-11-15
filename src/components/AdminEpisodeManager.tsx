@@ -706,8 +706,8 @@ export const AdminEpisodeManager: React.FC<AdminEpisodeManagerProps> = ({
                         alt={`${item.anime.name} - Ep ${item.episodeNumber}`}
                         loading="lazy"
                         decoding="async"
-                        width={400}
-                        height={225}
+                        width={500}
+                        height={281}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                         referrerPolicy="no-referrer"
                         onError={(e) => {

@@ -41,10 +41,10 @@ export const AnimeCard: React.FC<AnimeCardProps> = ({
           anime={anime}
           studioName={studioName}
           alt={anime.name}
-          tamaño="vineta"
+          tamaño="tarjeta23"
           loading="lazy"
-          width={300}
-          height={450}
+          width={360}
+          height={540}
           className="w-full h-full object-cover"
         />
       </div>

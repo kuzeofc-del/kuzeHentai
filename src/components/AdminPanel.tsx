@@ -5024,7 +5024,7 @@ export default function AdminPanel({ studios, genres, animes, onRefresh, onBackT
                     >
                       {animeImage ? (
                         <>
-                          <img src={portadaUrl(animeImage, 'horizontal')} alt="Vista previa" width={600} height={900} className="absolute inset-0 w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" />
+                          <img src={portadaUrl(animeImage, 'admin')} alt="Vista previa" width={600} height={900} className="absolute inset-0 w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" />
                           <CoverPreviewSizeBadge src={animeImage} showSourceType />
                           <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col items-center justify-center gap-2">
                             <Upload className="h-6 w-6 text-white animate-bounce" />

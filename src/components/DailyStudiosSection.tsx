@@ -96,12 +96,12 @@ export default function DailyStudiosSection({
           <div className="w-[88px] h-[88px] xs:w-[98px] xs:h-[98px] sm:w-[108px] sm:h-[108px] rounded-full overflow-hidden shadow-lg shadow-black/70 shrink-0 flex items-center justify-center relative bg-purple-950/30 transition-all duration-300">
             {cover ? (
               <img
-                src={portadaUrl(cover, 'mini')}
+                src={portadaUrl(cover, 'estudio')}
                 alt={studio.name}
                 loading="lazy"
                 decoding="async"
-                width={150}
-                height={150}
+                width={270}
+                height={270}
                 className="w-full h-full object-cover rounded-full drop-shadow-[0_4px_12px_rgba(0,0,0,0.6)] transition-transform duration-300 group-hover:scale-110"
                 onError={(e) => {
                   e.currentTarget.src = getFallbackSvg(studio.name);

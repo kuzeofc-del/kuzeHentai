@@ -2733,8 +2733,8 @@ export default function App() {
                           src={item.coverImage}
                           alt={`${item.anime.name} - Ep ${item.episodeNumber}`}
                           loading="lazy"
-                          width={400}
-                          height={225}
+                          width={500}
+                          height={281}
                           decoding="async"
                           className="w-full h-full object-cover"
                           referrerPolicy="no-referrer"
@@ -2786,12 +2786,12 @@ export default function App() {
                       anime={anime}
                       studioName={studioName}
                       alt={anime.name}
-                      tamaño="horizontal"
+                      tamaño="nuevos"
                       loading="lazy"
                       priority={false}
-                      width={600}
-                      height={338}
-                      className="w-full h-full object-cover object-[center_25%]"
+                      width={900}
+                      height={506}
+                      className="w-full h-full object-cover object-top"
                     />
                     {/* Solo difuminado suave abajo en el título */}
                     <div className="absolute inset-x-0 bottom-0 h-16 sm:h-20 bg-gradient-to-t from-[#090514]/95 via-[#090514]/70 to-transparent pointer-events-none" />
@@ -2886,9 +2886,9 @@ export default function App() {
                         tamaño="horizontal"
                         loading="lazy"
                         priority={false}
-                        width={600}
-                        height={338}
-                        className="w-full h-full object-cover object-[center_25%]"
+                        width={780}
+                        height={439}
+                        className="w-full h-full object-cover object-top"
                       />
                       {/* Difuminado suave abajo en el título */}
                       <div className="absolute inset-x-0 bottom-0 h-16 sm:h-20 bg-gradient-to-t from-[#090514]/95 via-[#090514]/70 to-transparent pointer-events-none" />
